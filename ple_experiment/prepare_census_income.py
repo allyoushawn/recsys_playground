@@ -37,27 +37,54 @@ def normalize_name(name: str) -> str:
 
 
 def find_income_column(df: pd.DataFrame) -> str:
-    candidates = []
+    """Robustly find the income target column.
+
+    Preference order:
+    1) Exact name 'income' or 'class'
+    2) Contains token 'income' but not 'class-of-worker' variants
+    3) Value-based detection: first column whose mapping produces both classes
+    """
+    # 1) Exact matches
     for c in df.columns:
         n = normalize_name(c)
-        if any(k in n for k in ["income", "class", ">50k", "<=50k"]):
-            candidates.append(c)
-    if not candidates:
-        raise ValueError("Could not find income/class target column in dataset")
-    # Prefer exact 'income' or 'class' style names
-    for key in ["income", "class"]:
-        for c in candidates:
-            if normalize_name(c) == key:
+        if n in {"income", "class"}:
+            return c
+    # 2) Contains 'income' (exclude class-of-worker style)
+    for c in df.columns:
+        n = normalize_name(c)
+        if "income" in n and not any(bad in n for bad in ["class of worker", "class worker", "worker"]):
+            return c
+    # 3) Value-based detection
+    for c in df.columns:
+        try:
+            y = map_income_to_binary(df[c])
+            if set(np.unique(y)) == {0, 1}:
                 return c
-    return candidates[0]
+        except Exception:
+            continue
+    raise ValueError("Could not find income/class target column in dataset")
 
 
 def find_marital_column(df: pd.DataFrame) -> str:
+    # Prefer names containing 'marital'
     for c in df.columns:
-        n = normalize_name(c)
-        if "marital" in n:
+        if "marital" in normalize_name(c):
             return c
-    raise ValueError("Could not find marital-status column in dataset")
+    # Fallback: value-based detection (choose column yielding most positives for never married)
+    best = None
+    best_pos = -1
+    for c in df.columns:
+        try:
+            y = map_never_married_to_binary(df[c])
+            pos = int((y == 1).sum())
+            if pos > best_pos:
+                best_pos = pos
+                best = c
+        except Exception:
+            continue
+    if best is None:
+        raise ValueError("Could not find marital-status column in dataset")
+    return best
 
 
 def map_income_to_binary(series: pd.Series) -> np.ndarray:
@@ -70,6 +97,13 @@ def map_income_to_binary(series: pd.Series) -> np.ndarray:
     We normalize by stripping, lowering, and removing spaces/commas/periods.
     Then check for tokens like ">50k", ">50000", or "50000+".
     """
+    # Pass-through numeric {0,1}
+    if np.issubdtype(series.dtype, np.number):
+        vals = series.astype(np.int64)
+        uniq = set(pd.unique(vals))
+        if uniq.issubset({0, 1}):
+            return vals.astype(np.uint8).to_numpy()
+
     vals = series.astype(str).str.strip().str.lower()
     # Remove spaces, commas, and trailing periods for robust matching
     vals = (
@@ -81,15 +115,20 @@ def map_income_to_binary(series: pd.Series) -> np.ndarray:
         vals.str.contains(">50k")
         | vals.str.contains(">=50k")
         | vals.str.contains(">50000")
-        | vals.str.contains("50000\+")
+        | vals.str.contains(r"50000\+", regex=True)
     )
     return pos.astype(np.uint8).to_numpy()
 
 
 def map_never_married_to_binary(series: pd.Series) -> np.ndarray:
     vals = series.astype(str).str.strip().str.lower()
-    # Normalize hyphen/period variants
-    vals = vals.str.replace("-", " ", regex=False).str.replace(".", "", regex=False)
+    # Normalize hyphen/period variants and strip quotes
+    vals = (
+        vals.str.replace("-", " ", regex=False)
+        .str.replace(".", "", regex=False)
+        .str.replace(r"^[\'\"]+|[\'\"]+$", "", regex=True)
+        .str.strip()
+    )
     y = (vals == "never married")
     return y.astype(np.uint8).to_numpy()
 
@@ -377,6 +416,14 @@ def main() -> None:
     print(summarize_split("Train", y_inc_train, y_nv_train))
     print(summarize_split("Val", y_inc_val, y_nv_val))
     print(summarize_split("Test", y_inc_test, y_nv_test))
+
+    # Guard: ensure both classes exist for y_income in each split
+    for split_name, arr in [("train", y_inc_train), ("val", y_inc_val), ("test", y_inc_test)]:
+        if len(np.unique(arr)) < 2:
+            raise ValueError(
+                f"Split '{split_name}' for y_income is single-class. "
+                "Verify target detection/mapping; consider re-running with a fresh output_dir."
+            )
 
     # Build and fit pipeline on train only
     pre = build_pipeline(num_cols, cat_cols, min_freq=cfg.onehot_min_freq)

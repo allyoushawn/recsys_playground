@@ -37,6 +37,11 @@ What it does
   - `feature_meta.json` (column lists, categories, scaler stats, sklearn version, pipeline hash)
 - Performs basic validations and a quick PyTorch DataLoader sanity check.
 
+Robust target detection
+- Detects the correct income column (prefers exact `income` or `class`, avoids `class-of-worker`), with a value-based fallback.
+- Income mapping handles OpenML and UCI variants and numeric 0/1 targets.
+- Validates that each split has both classes for `y_income`; raises a clear error otherwise.
+
 Using the Dataset utilities
 ```
 from ple_experiment.dataset import CensusKDDDataset, make_dataloaders
@@ -120,4 +125,3 @@ Notes
 - Mixed precision (AMP) is enabled by default when CUDA is available.
 - Pos‑class weighting can be enabled via `--use_pos_weight` (computes `neg/pos` from train labels per task).
 - The implementation follows the PLE routing scheme with two levels, shared + task‑specific experts per level, and per‑task/shared gates mixing all experts at that level.
-
