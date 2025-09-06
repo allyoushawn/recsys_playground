@@ -61,10 +61,29 @@ def find_marital_column(df: pd.DataFrame) -> str:
 
 
 def map_income_to_binary(series: pd.Series) -> np.ndarray:
-    vals = series.astype(str).str.strip().str.lower().str.replace(".", "", regex=False)
-    # True if contains '>50k' token (with or without period)
-    y = vals.str.contains("50k") & vals.str.contains(">")
-    return y.astype(np.uint8).to_numpy()
+    """Map income labels to {0,1} robustly for OpenML/UCI variants.
+
+    Positive cases include strings like:
+    - ">50K", ">=50K" (OpenML)
+    - "50000+", "50000+." (UCI style)
+
+    We normalize by stripping, lowering, and removing spaces/commas/periods.
+    Then check for tokens like ">50k", ">50000", or "50000+".
+    """
+    vals = series.astype(str).str.strip().str.lower()
+    # Remove spaces, commas, and trailing periods for robust matching
+    vals = (
+        vals.str.replace(" ", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace(".", "", regex=False)
+    )
+    pos = (
+        vals.str.contains(">50k")
+        | vals.str.contains(">=50k")
+        | vals.str.contains(">50000")
+        | vals.str.contains("50000\+")
+    )
+    return pos.astype(np.uint8).to_numpy()
 
 
 def map_never_married_to_binary(series: pd.Series) -> np.ndarray:

@@ -10,7 +10,13 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 from torch import nn, optim, Tensor
-from torch.cuda.amp import GradScaler, autocast
+# AMP: prefer torch.amp with device_type, fallback to torch.cuda.amp
+try:
+    from torch import amp as _amp  # PyTorch >= 2.0 recommended API
+    _USE_NEW_AMP = True
+except Exception:  # pragma: no cover
+    from torch.cuda import amp as _amp  # type: ignore
+    _USE_NEW_AMP = False
 from torch.utils.data import DataLoader
 
 # Ensure local imports work when running via `python ple_experiment/train_ple.py`
@@ -158,7 +164,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str, pos_weights: Tup
     inc = agg(inc_vals)
     nm = agg(nm_vals)
     total_loss = inc["loss"] + nm["loss"]
-    combined_auc = np.nanmean([inc["auc"], nm["auc"]])
+    aucs = [v for v in [inc["auc"], nm["auc"]] if not np.isnan(v)]
+    combined_auc = float(np.mean(aucs)) if aucs else float("nan")
     return {
         "loss": total_loss,
         "inc_loss": inc["loss"],
@@ -176,7 +183,7 @@ def train_epoch(
     loader: DataLoader,
     device: str,
     optimizer: optim.Optimizer,
-    scaler: GradScaler | None,
+    scaler,
     w_income: float,
     w_nm: float,
     pos_weights: Tuple[float | None, float | None],
@@ -188,13 +195,19 @@ def train_epoch(
     inc_vals = []
     nm_vals = []
 
+    device_type = "cuda" if device == "cuda" else "cpu"
     for batch in loader:
         x = batch["x"].to(device, non_blocking=True)
         yi = batch["y_income"].to(device, non_blocking=True).float()
         yn = batch["y_never_married"].to(device, non_blocking=True).float()
 
         optimizer.zero_grad(set_to_none=True)
-        with autocast(enabled=mixed_precision):
+        # autocast context with device_type when available
+        if _USE_NEW_AMP:
+            ac = _amp.autocast(device_type=device_type, enabled=mixed_precision)
+        else:
+            ac = _amp.autocast(enabled=mixed_precision)
+        with ac:
             logit_i, logit_n = model(x)
             # Build BCE losses (per-task, with optional pos_weight)
             if pos_weights[0] is not None:
@@ -244,7 +257,8 @@ def train_epoch(
 
     inc = agg(inc_vals)
     nm = agg(nm_vals)
-    combined_auc = np.nanmean([inc["auc"], nm["auc"]])
+    aucs = [v for v in [inc["auc"], nm["auc"]] if not np.isnan(v)]
+    combined_auc = float(np.mean(aucs)) if aucs else float("nan")
     return {
         "loss": float(total / max(1, len(loader))),
         "inc_loss": inc["loss"],
@@ -301,7 +315,11 @@ def main() -> None:
     else:
         pos_w = (None, None)
 
-    scaler = GradScaler(enabled=cfg.mixed_precision and (device == "cuda"))
+    # GradScaler per new API if available
+    if _USE_NEW_AMP and device == "cuda":
+        scaler = _amp.GradScaler("cuda", enabled=cfg.mixed_precision)
+    else:
+        scaler = _amp.GradScaler(enabled=cfg.mixed_precision and (device == "cuda"))
 
     best_auc = -float("inf")
     patience = 3
@@ -325,6 +343,7 @@ def main() -> None:
         scheduler.step()
 
         comb = va["combined_auc"]
+        comb_for_select = comb if not np.isnan(comb) else -float("inf")
         line = {
             "epoch": epoch,
             "train": tr,
@@ -341,8 +360,8 @@ def main() -> None:
         torch.save({"model": model.state_dict(), "cfg": asdict(cfg)}, os.path.join(cfg.out_dir, "last.pt"))
 
         # Early stopping + best checkpoint on val combined AUC
-        if comb > best_auc:
-            best_auc = comb
+        if epoch == 1 or comb_for_select > best_auc:
+            best_auc = comb_for_select
             bad_epochs = 0
             torch.save({"model": model.state_dict(), "cfg": asdict(cfg)}, os.path.join(cfg.out_dir, "best.pt"))
         else:
@@ -353,8 +372,13 @@ def main() -> None:
 
     # Final Test evaluation
     # Load best checkpoint
-    best_ckpt = torch.load(os.path.join(cfg.out_dir, "best.pt"), map_location=device)
-    model.load_state_dict(best_ckpt["model"])
+    try:
+        best_ckpt = torch.load(os.path.join(cfg.out_dir, "best.pt"), map_location=device)
+        model.load_state_dict(best_ckpt["model"])
+    except FileNotFoundError:
+        print("best.pt not found; falling back to last.pt")
+        last_ckpt = torch.load(os.path.join(cfg.out_dir, "last.pt"), map_location=device)
+        model.load_state_dict(last_ckpt["model"])
     te = evaluate(model, loaders["test"], device, pos_w)
     report = {
         "test": te,
@@ -370,4 +394,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
