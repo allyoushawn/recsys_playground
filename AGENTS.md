@@ -1,6 +1,6 @@
 # Project: MovieLens-100K Recommender System
 
-> IMPORTANT: Before running any commands or notebooks, activate the virtual environment `vevn` (e.g., `source venv/bin/activate`).
+> IMPORTANT: Before running any commands or notebooks, activate the virtual environment `venv` (e.g., `source venv/bin/activate`).
 
 ## Goal
 Build a research prototype for recommendation models using the MovieLens-100K dataset.  
@@ -36,6 +36,10 @@ Objectives:
 - [ ] ALS model (PySpark / Surprise / Implicit)
 - [ ] Evaluation metrics implementation
 - [ ] First results notebook
+
+### Repo/Git
+- Default branch: `main` (tracking `origin/main`)
+- Remote `origin`: `git@github.com:allyoushawn/recsys_playground.git`
 
 ---
 
