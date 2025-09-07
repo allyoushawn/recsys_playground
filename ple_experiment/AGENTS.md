@@ -12,10 +12,15 @@ Outputs are train/val/test NumPy arrays and lightweight PyTorch dataset/dataload
 ---
 
 ## Folder Structure (self‑contained)
-- `prepare_census_income.py` — main CLI to fetch, preprocess, split, and save artifacts
+- `prepare_census_income.py` — main CLI to fetch, preprocess, split, and save artifacts (robust target detection baked in)
 - `dataset.py` — `CensusKDDDataset` and `make_dataloaders` utilities
+- `metrics.py` — binary metrics (loss/acc/AUROC) shared by baselines
+- `model.py` — PLE model (2 levels) and towers
+- `train_ple.py` — PLE training/eval script (AMP, early stop, checkpoints)
+- `mmoe_model.py` — MMoE/ML‑MMoE model and towers
+- `train_mmoe.py` — MMoE training/eval script (parity with PLE)
+- `README.md` — data prep quickstart, examples, and usage, how to run PLE and artifact details, how to run MMoE and parity notes vs PLE
 - `requirements.txt` — minimal dependencies for this subproject
-- `README.md` — quickstart, examples, and usage
 - `__init__.py` — enables package imports
 
 Artifacts written to `--output_dir`:
@@ -30,9 +35,9 @@ Artifacts written to `--output_dir`:
 - Primary: OpenML "Census‑Income (KDD)" via `sklearn.datasets.fetch_openml(as_frame=True)`
 - Fallback: UCI repository with a known schema; rows concatenated from `data` and `test` if both are available
 
-Targets are detected robustly:
-- Income column: inferred among names like `income`, `class`, `>50K`, `<=50K`; mapped to `{0: <=50K, 1: >50K}`
-- Marital column: any column containing `marital`; `"Never married" → 1`, otherwise `0`
+Targets are detected robustly (prep script):
+- Income column: prefers exact `income`/`class`, excludes `class‑of‑worker`; value‑based fallback; mapping handles OpenML and UCI variants and numeric 0/1
+- Marital column: prefers names containing `marital`; value‑based fallback; maps exactly `Never married` → 1, else 0
 
 ---
 
@@ -53,7 +58,7 @@ Printed report includes split sizes, final feature dimensionality, and class dis
 
 ---
 
-## CLI Usage
+## CLI Usage (Data Prep)
 Run from the repository root or this folder:
 
 ```
@@ -62,7 +67,7 @@ python ple_experiment/prepare_census_income.py \
   --test_size 0.15 \
   --val_size 0.10 \
   --batch_size 4096 \
-  --num_workers 4 \
+  --num_workers 2 \
   --onehot_min_freq 10 \
   --seed 42
 ```
@@ -84,6 +89,8 @@ import os, sys
 if not os.path.exists(repo_dir):
     !git clone $repo_url
 %cd $repo_dir
+!git fetch --all
+!git checkout 20250906_mmoe_dev || echo 'Branch not found; staying on default.'
 !pip -q install -r ple_experiment/requirements.txt
 
 # Run prep
@@ -92,7 +99,7 @@ if not os.path.exists(repo_dir):
   --test_size 0.15 \
   --val_size 0.10 \
   --batch_size 4096 \
-  --num_workers 4 \
+  --num_workers 2 \
   --onehot_min_freq 10 \
   --seed 42
 
@@ -100,6 +107,41 @@ if not os.path.exists(repo_dir):
 from ple_experiment.dataset import CensusKDDDataset, make_dataloaders
 ds = CensusKDDDataset('./data/census_kdd', split='train')
 print('Train shapes:', ds.X.shape, ds.y_income.shape, ds.y_never.shape)
+```
+
+### Train Baselines (Colab)
+- PLE (2 levels):
+```
+!python ple_experiment/train_ple.py \
+  --data_dir ./data/census_kdd \
+  --out_dir ./runs/ple_census \
+  --epochs 5 \
+  --batch_size 4096 \
+  --num_workers 2 \
+  --lr 2e-3 --weight_decay 1e-4 \
+  --d_model 128 --expert_hidden 256 \
+  --num_levels 2 \
+  --dropout 0.1 \
+  --w_income 1.0 --w_never_married 1.0 \
+  --use_pos_weight true --grad_clip 1.0 \
+  --mixed_precision true --seed 42
+```
+
+- MMoE (single level by default):
+```
+!python ple_experiment/train_mmoe.py \
+  --data_dir ./data/census_kdd \
+  --out_dir ./runs/mmoe_census \
+  --epochs 5 \
+  --batch_size 4096 \
+  --num_workers 2 \
+  --lr 2e-3 --weight_decay 1e-4 \
+  --d_model 128 --expert_hidden 256 \
+  --num_experts 4 --num_levels 1 \
+  --dropout 0.1 \
+  --w_income 1.0 --w_never_married 1.0 \
+  --use_pos_weight true --grad_clip 1.0 \
+  --mixed_precision true --seed 42
 ```
 
 ---
@@ -118,10 +160,11 @@ print('Train shapes:', ds.X.shape, ds.y_income.shape, ds.y_never.shape)
 - [x] Saved artifacts and feature metadata
 - [x] PyTorch dataset/dataloaders + sanity check
 - [x] README and self‑contained requirements
+- [x] PLE baseline (model + training)
+- [x] MMoE baseline (model + training)
 
 ## Next Tasks
 - Optional unit tests for IO and splits
 - Add caching for OpenML data and UCI downloads
-- Example training script for a simple MTL/PLE model
+- Add notebook comparison plots (PLE vs MMoE)
 - CI smoke test to run the prep on a small subset
-
