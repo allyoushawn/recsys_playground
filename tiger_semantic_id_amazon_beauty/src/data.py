@@ -74,7 +74,15 @@ def load_meta_df(meta_path: str) -> pd.DataFrame:
     cols = ["asin", "title", "brand", "category", "price"]
     df = pd.DataFrame(rows)
     df = df[[c for c in cols if c in df.columns]].copy()
-    df = df.rename(columns={"asin": "item_id"})
+    # Ensure an 'item_id' column exists regardless of field naming in source
+    if "asin" in df.columns and "item_id" not in df.columns:
+        df = df.rename(columns={"asin": "item_id"})
+    if "item_id" not in df.columns:
+        # Fallback: try common alternatives or create empty IDs to avoid KeyError downstream
+        if "id" in df.columns:
+            df["item_id"] = df["id"].astype(str)
+        else:
+            df["item_id"] = pd.Series([None] * len(df))
     # Normalize category: keep last leaf where possible
     def leaf(cat):
         if isinstance(cat, list) and cat:
@@ -177,4 +185,3 @@ def save_mappings(
         json.dump(user2id, f)
     with open(os.path.join(artifacts_dir, "item2id.json"), "w") as f:
         json.dump(item2id, f)
-
