@@ -71,7 +71,7 @@ def load_reviews_df(reviews_path: str) -> pd.DataFrame:
 
 def load_meta_df(meta_path: str) -> pd.DataFrame:
     rows = _parse_json_lines(meta_path)
-    cols = ["asin", "title", "brand", "category", "price"]
+    cols = ["asin", "title", "brand", "category", "categories", "price"]
     df = pd.DataFrame(rows)
     df = df[[c for c in cols if c in df.columns]].copy()
     # Ensure an 'item_id' column exists regardless of field naming in source
@@ -83,18 +83,19 @@ def load_meta_df(meta_path: str) -> pd.DataFrame:
             df["item_id"] = df["id"].astype(str)
         else:
             df["item_id"] = pd.Series([None] * len(df))
-    # Normalize category: keep last leaf where possible
-    def leaf(cat):
-        if isinstance(cat, list) and cat:
-            # Snap formats can be like [["Beauty", "Hair Care"]] or nested
-            last = cat[-1]
+    # Normalize category: keep last leaf where possible. Handle both 'category' and 'categories'
+    def leaf_any(x):
+        if isinstance(x, list) and x:
+            last = x[-1]
             if isinstance(last, list):
                 last = last[-1] if last else None
             return last
         return None
 
-    if "category" in df.columns:
-        df["category_leaf"] = df["category"].apply(leaf)
+    if "category" in df.columns and df["category"].notna().any():
+        df["category_leaf"] = df["category"].apply(leaf_any)
+    elif "categories" in df.columns:
+        df["category_leaf"] = df["categories"].apply(leaf_any)
     else:
         df["category_leaf"] = None
     for c in ("title", "brand", "category_leaf"):
