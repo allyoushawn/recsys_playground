@@ -1,0 +1,18 @@
+# Core
+torch
+torchvision
+torchaudio
+sentence-transformers>=2.2.2,<3
+transformers>=4.36,<5
+pandas>=1.5
+numpy>=1.23
+scikit-learn>=1.1
+tqdm>=4.65
+matplotlib>=3.7
+umap-learn>=0.5.4
+
+# Optional (fast JSON)
+# orjson>=3.9
+
+# Dev (tests)
+pytest>=7.3
