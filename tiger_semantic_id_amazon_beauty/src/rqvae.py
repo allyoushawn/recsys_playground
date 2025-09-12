@@ -123,7 +123,9 @@ def train_rqvae(
     # K-means init on a sample batch
     with torch.no_grad():
         sample = data[torch.randperm(data.shape[0])[: min(batch_size, data.shape[0])]].to(device)
-        model.codebook.kmeans_init(sample)
+        # Encode the sample to get the correct latent dimension for kmeans init
+        encoded_sample = model.encoder(sample)
+        model.codebook.kmeans_init(encoded_sample)
     N = data.shape[0]
     for ep in range(1, epochs + 1):
         perm = torch.randperm(N, device=device)
