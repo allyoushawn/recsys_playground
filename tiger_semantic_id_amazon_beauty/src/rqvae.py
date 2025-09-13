@@ -23,9 +23,21 @@ class RQCodebook(nn.Module):
         """K-means init per level on a sample batch x: [B, D]."""
         B = x.shape[0]
         for l in range(self.levels):
-            # random sample as initial centers
-            idx = torch.randperm(B, device=x.device)[: self.codebook_size]
+            # random sample as initial centers - fix: ensure we don't exceed batch size
+            n_centers = min(self.codebook_size, B)
+            idx = torch.randperm(B, device=x.device)[:n_centers]
             centers = x[idx].clone()
+            
+            # If we have fewer samples than codebook size, add random noise to fill
+            if n_centers < self.codebook_size:
+                remaining = self.codebook_size - n_centers
+                # Add noise-perturbed copies of existing centers
+                noise_std = 0.1
+                for i in range(remaining):
+                    base_idx = i % n_centers
+                    noise = torch.randn_like(centers[base_idx]) * noise_std
+                    centers = torch.cat([centers, centers[base_idx:base_idx+1] + noise], dim=0)
+            
             for _ in range(iters):
                 dist = torch.cdist(x, centers)  # [B, K]
                 assign = dist.argmin(dim=1)
