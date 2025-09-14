@@ -7,6 +7,31 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+@torch.no_grad()
+def _kmeans(x: torch.Tensor, k: int, iters: int = 10) -> torch.Tensor:
+    """L2 k-means centers; x: [B,D]."""
+    B = x.shape[0]
+    n_centers = min(k, B)
+    # init by sampling without replacement, then repeat (with noise) if needed
+    idx = torch.randperm(B, device=x.device)[:n_centers]
+    centers = x[idx].clone()
+    if n_centers < k:
+        rem = k - n_centers
+        noise = 0.05 * x.std(dim=0, keepdim=True).clamp_min(1e-6)
+        add = centers[:rem] + torch.randn_like(centers[:rem]) * noise
+        centers = torch.cat([centers, add], dim=0)
+
+    for _ in range(iters):
+        # assign
+        dist = torch.cdist(x, centers)  # [B, k]
+        assign = dist.argmin(dim=1)
+        # update
+        for j in range(k):
+            m = (assign == j)
+            if m.any():
+                centers[j] = x[m].mean(dim=0)
+    return centers
+
 
 class RQCodebook(nn.Module):
     def __init__(self, levels: int, codebook_size: int, dim: int):
@@ -20,32 +45,16 @@ class RQCodebook(nn.Module):
 
     @torch.no_grad()
     def kmeans_init(self, x: torch.Tensor, iters: int = 10) -> None:
-        """K-means init per level on a sample batch x: [B, D]."""
-        B = x.shape[0]
+        # x: [B,D] = encoder(normalized(x_raw))
+        res = x.clone()
         for l in range(self.levels):
-            # random sample as initial centers - fix: ensure we don't exceed batch size
-            n_centers = min(self.codebook_size, B)
-            idx = torch.randperm(B, device=x.device)[:n_centers]
-            centers = x[idx].clone()
-            
-            # If we have fewer samples than codebook size, add random noise to fill
-            if n_centers < self.codebook_size:
-                remaining = self.codebook_size - n_centers
-                # Add noise-perturbed copies of existing centers
-                noise_std = 0.1
-                for i in range(remaining):
-                    base_idx = i % n_centers
-                    noise = torch.randn_like(centers[base_idx]) * noise_std
-                    centers = torch.cat([centers, centers[base_idx:base_idx+1] + noise], dim=0)
-            
-            for _ in range(iters):
-                dist = torch.cdist(x, centers)  # [B, K]
-                assign = dist.argmin(dim=1)
-                for k in range(self.codebook_size):
-                    mask = assign == k
-                    if mask.any():
-                        centers[k] = x[mask].mean(dim=0)
+            centers = _kmeans(res, self.codebook_size, iters)  # your current routine
             self.codebooks[l].copy_(centers)
+            # quantize current residual to subtract
+            dist = torch.cdist(res, centers); idx = dist.argmin(dim=1)
+            q = F.embedding(idx, centers)
+            res = res - q
+
 
     def forward(self, residual: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize residual w.r.t. nearest codeword at each level sequentially.
@@ -99,26 +108,52 @@ class RQVAEConfig:
     codebook_size: int = 256
     beta: float = 0.25
 
+@torch.no_grad()
+def code_usage(model: RQVAE, data: torch.Tensor, max_batches: int = 4, bs: int = 4096):
+    model.eval()
+    L, K = model.cfg.levels, model.cfg.codebook_size
+    counts = [torch.zeros(K, device=data.device) for _ in range(L)]
+    n = min(max_batches*bs, data.shape[0])
+    for i in range(0, n, bs):
+        xb = data[i:i+bs]
+        z = model.encoder(model.normalize(xb))
+        _, codes = model.codebook(z)  # [B,L]
+        for l in range(L):
+            binc = torch.bincount(codes[:, l], minlength=K).float()
+            counts[l][:binc.numel()] += binc
+    return [c / c.sum().clamp_min(1.0) for c in counts]  # distributions
 
+
+# in rqvae.py
 class RQVAE(nn.Module):
     def __init__(self, cfg: RQVAEConfig):
         super().__init__()
         self.cfg = cfg
+        self.register_buffer("x_mean", torch.zeros(1, cfg.input_dim))
+        self.register_buffer("x_std", torch.ones(1, cfg.input_dim))
         self.encoder = MLP([cfg.input_dim, 512, 256, 128, cfg.latent_dim])
         self.decoder = MLP([cfg.latent_dim, 128, 256, 512, cfg.input_dim])
         self.codebook = RQCodebook(cfg.levels, cfg.codebook_size, cfg.latent_dim)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        z = self.encoder(x)
+    def normalize(self, x):
+        return (x - self.x_mean) / (self.x_std + 1e-8)
+
+    def forward(self, x):
+        x_n = self.normalize(x)
+        z = self.encoder(x_n)
         q, codes = self.codebook(z)
         x_hat = self.decoder(q)
-        # Losses
-        recon = F.mse_loss(x_hat, x)
-        # VQ losses: commit + codebook (stop-grad on one side)
+        recon = F.mse_loss(x_hat, x_n)   # reconstruct normalized space (simplest)
         commit = F.mse_loss(z.detach(), q)
         code = F.mse_loss(z, q.detach())
         loss = recon + self.cfg.beta * (commit + code)
         return x_hat, loss, recon, codes
+
+@torch.no_grad()
+def fit_normalizer(model: RQVAE, data: torch.Tensor):
+    model.x_mean.copy_(data.mean(dim=0, keepdim=True))
+    model.x_std.copy_(data.std(dim=0, keepdim=True))
+
 
 
 def train_rqvae(
@@ -126,42 +161,55 @@ def train_rqvae(
     data: torch.Tensor,
     epochs: int = 50,
     batch_size: int = 1024,
-    lr: float = 4e-1,
+    lr: float = 1e-3,  # safer default
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ) -> RQVAE:
     model = model.to(device)
     data = data.to(device)
-    opt = torch.optim.Adagrad(model.parameters(), lr=lr)
-    # K-means init on a sample batch
+
+    # Fit normalizer once on full data
     with torch.no_grad():
-        sample = data[torch.randperm(data.shape[0])[: min(batch_size, data.shape[0])]].to(device)
-        # Encode the sample to get the correct latent dimension for kmeans init
-        encoded_sample = model.encoder(sample)
+        fit_normalizer(model, data)
+
+    opt = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.99))
+
+    # K-means init on encoded, normalized residuals
+    with torch.no_grad():
+        # draw up to batch_size samples
+        ridx = torch.randperm(data.shape[0], device=device)[:min(batch_size, data.shape[0])]
+        sample = data[ridx]
+        sample_n = model.normalize(sample)
+        encoded_sample = model.encoder(sample_n)
         model.codebook.kmeans_init(encoded_sample)
+
     N = data.shape[0]
     for ep in range(1, epochs + 1):
         perm = torch.randperm(N, device=device)
         total = 0.0
         for i in range(0, N, batch_size):
-            idx = perm[i : i + batch_size]
-            xb = data[idx]
-            x_hat, loss, recon, _ = model(xb)
+            xb = data[perm[i:i+batch_size]]
+            _, loss, _, _ = model(xb)
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             total += loss.item() * xb.size(0)
+
         if ep % 5 == 0 or ep == 1:
-            print(f"[RQVAE] epoch {ep}/{epochs} loss={total/N:.4f}")
+            print(f"[RQVAE] epoch {ep}/{epochs} loss={total/N:.6f}")
+            dists = code_usage(model, data)
+            perplexities = [torch.exp(-(d * (d.clamp_min(1e-12).log())).sum()).item() for d in dists]
+            print(f"   usage perplexity per level: {perplexities}")
     return model
+
 
 
 @torch.no_grad()
 def encode_codes(model: RQVAE, data: torch.Tensor, device: str | None = None) -> torch.Tensor:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    data = data.to(device)
-    z = model.encoder(data)
+    model = model.to(device); data = data.to(device)
+    z = model.encoder(model.normalize(data))
     _, codes = model.codebook(z)
     return codes.cpu()
+
 
