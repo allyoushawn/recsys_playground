@@ -131,9 +131,39 @@ class RQVAE(nn.Module):
         self.cfg = cfg
         self.register_buffer("x_mean", torch.zeros(1, cfg.input_dim))
         self.register_buffer("x_std", torch.ones(1, cfg.input_dim))
-        self.encoder = MLP([cfg.input_dim, 512, 256, 128, cfg.latent_dim])
-        self.decoder = MLP([cfg.latent_dim, 128, 256, 512, cfg.input_dim])
+        
+        # Improved shallower encoder with dropout (like ImprovedRQVAE)
+        self.encoder = nn.Sequential(
+            nn.Linear(cfg.input_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 128),
+            nn.ReLU(), 
+            nn.Dropout(0.1),
+            nn.Linear(128, cfg.latent_dim)
+        )
+        
+        # Improved shallower decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(cfg.latent_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 256),
+            nn.ReLU(),
+            nn.Linear(256, cfg.input_dim)
+        )
+        
         self.codebook = RQCodebook(cfg.levels, cfg.codebook_size, cfg.latent_dim)
+        
+        # Apply improved initialization
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        """Improved weight initialization like ImprovedRQVAE"""
+        if isinstance(m, nn.Linear):
+            # Use He/Kaiming initialization for better diversity preservation
+            nn.init.kaiming_uniform_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
 
     def normalize(self, x):
         return (x - self.x_mean) / (self.x_std + 1e-8)
