@@ -42,9 +42,16 @@ def build_item_text(meta_df: pd.DataFrame) -> Dict[int, str]:
 
 
 def encode_items(
-    item_texts: Dict[int, str], model_name: str = "sentence-t5-base", batch_size: int = 256
+    item_texts: Dict[int, str], model_name: str = "sentence-t5-base", batch_size: int = 256,
+    device: str | None = None
 ) -> torch.Tensor:
     """Encode item texts with SentenceTransformer -> embeddings [num_items, hidden].
+
+    Args:
+        item_texts: Dictionary mapping item indices to text descriptions
+        model_name: Name of the SentenceTransformer model
+        batch_size: Batch size for encoding
+        device: Device to use ('cuda', 'cpu', or None for auto-detect)
 
     In test environments without the dependency, monkeypatch `SentenceTransformer`
     in this module to a fake encoder that provides `.encode(...)`.
@@ -53,18 +60,38 @@ def encode_items(
         raise ImportError(
             "sentence-transformers is not installed. Install it or monkeypatch SentenceTransformer for tests."
         )
-    model = SentenceTransformer(model_name)
+    
+    # Auto-detect device if not specified
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    print(f"Using device: {device} for SentenceTransformer encoding")
+    
+    # Create model and move to specified device
+    model = SentenceTransformer(model_name, device=device)
+    
     # Keep input order stable by sorting by index
     idxs = sorted(item_texts.keys())
     texts = [item_texts[i] for i in idxs]
-    emb = model.encode(texts, batch_size=batch_size, show_progress_bar=True, convert_to_tensor=True)
-    # Reorder to original idx positions
-    emb = emb.detach().cpu()
+    
+    # Encode with GPU acceleration if available
+    emb = model.encode(
+        texts, 
+        batch_size=batch_size, 
+        show_progress_bar=True, 
+        convert_to_tensor=True,
+        device=device  # Ensure encoding happens on specified device
+    )
+    
+    # Keep on GPU for now, only move to CPU when needed
     if max(idxs, default=-1) + 1 == len(idxs):
-        return emb
+        # Contiguous indices - return directly (keep on device)
+        return emb.detach()
+    
     # If item_idx not contiguous, expand to full array and scatter
     dim = emb.shape[1]
-    out = torch.zeros(max(idxs) + 1, dim, dtype=emb.dtype)
+    out = torch.zeros(max(idxs) + 1, dim, dtype=emb.dtype, device=emb.device)
     for j, i in enumerate(idxs):
         out[i] = emb[j]
-    return out
+    
+    return out.detach()
