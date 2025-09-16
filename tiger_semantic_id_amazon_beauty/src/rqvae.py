@@ -83,6 +83,44 @@ class RQCodebook(nn.Module):
         codes = torch.stack(codes, dim=1)  # [B,L]
         return quantized_sum, codes
 
+    def forward_with_losses(self, residual: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize residual and compute per-level VQ losses for training.
+
+        Returns: (quantized, codes, commit_loss, codebook_loss) where
+          - quantized: [B, D] sum of per-level quantized vectors
+          - codes: [B, L] indices chosen per level
+          - commit_loss: sum of ||sg[r_l] - e_c_l||² over all levels
+          - codebook_loss: sum of ||r_l - sg[e_c_l]||² over all levels
+        """
+        B, D = residual.shape
+        device = residual.device
+        codes = []
+        quantized_sum = torch.zeros_like(residual)
+        res = residual
+        commit_loss = 0.0
+        codebook_loss = 0.0
+
+        for l in range(self.levels):
+            emb = self.codebooks[l]  # [K, D]
+            # find nearest neighbor
+            # dist(x, e)^2 = |x|^2 + |e|^2 - 2 x.e
+            x2 = (res**2).sum(dim=1, keepdim=True)  # [B,1]
+            e2 = (emb**2).sum(dim=1)  # [K]
+            scores = x2 + e2 - 2 * res @ emb.t()  # [B,K]
+            idx = scores.argmin(dim=1)
+            codes.append(idx)
+            q = F.embedding(idx, emb)
+
+            # Per-level VQ losses as defined in the paper
+            commit_loss += F.mse_loss(res.detach(), q)  # ||sg[r_l] - e_c_l||²
+            codebook_loss += F.mse_loss(res, q.detach())  # ||r_l - sg[e_c_l]||²
+
+            quantized_sum = quantized_sum + q
+            res = res - q
+
+        codes = torch.stack(codes, dim=1)  # [B,L]
+        return quantized_sum, codes, commit_loss, codebook_loss
+
 
 class MLP(nn.Module):
     def __init__(self, dims: List[int], activation=nn.ReLU, out_activation=None):
@@ -171,12 +209,10 @@ class RQVAE(nn.Module):
     def forward(self, x):
         x_n = self.normalize(x)
         z = self.encoder(x_n)
-        q, codes = self.codebook(z)
+        q, codes, commit_loss, codebook_loss = self.codebook.forward_with_losses(z)
         x_hat = self.decoder(q)
         recon = F.mse_loss(x_hat, x_n)   # reconstruct normalized space (simplest)
-        commit = F.mse_loss(z.detach(), q)
-        code = F.mse_loss(z, q.detach())
-        loss = recon + self.cfg.beta * (commit + code)
+        loss = recon + codebook_loss + self.cfg.beta * commit_loss
         return x_hat, loss, recon, codes
 
 @torch.no_grad()

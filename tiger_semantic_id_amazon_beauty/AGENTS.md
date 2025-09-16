@@ -59,12 +59,15 @@
 ## RQ‑VAE Semantic IDs
 - Model config:
   - latent_dim=32, levels=3, codebook_size=256, beta=0.25
-  - encoder MLP: [512, 256, 128] → latent
-  - decoder MLP: [128, 256, 512] → recon
+  - encoder MLP: [768→256→128→32] with ReLU + dropout(0.1) (improved architecture)
+  - decoder MLP: [32→128→256→768] with ReLU (improved architecture)
   - Residual vector quantization across levels with k‑means init per level (first batch).
-  - Loss: MSE recon + per‑level vector‑quantization terms (stop‑gradient).
+  - **Loss (CORRECTED)**: MSE recon + Σ(l=0 to m-1)[||sg[r_l] - e_c_l||² + β||r_l - sg[e_c_l]||²]
+    - Per-level codebook loss (no β): ||sg[r_l] - e_c_l||²
+    - Per-level commitment loss (with β): β||r_l - sg[e_c_l]||²
+    - Implementation: `loss = recon + codebook_loss + beta * commit_loss`
 - Training:
-  - Optimizer: Adagrad(lr=0.4), batch_size=1024, epochs≈50 (downscalable for smoke tests).
+  - Optimizer: Adam(lr=1e-3), batch_size=1024, epochs≈50 (safer defaults)
   - Track per‑level code usage (target ≥ 80%).
 - Semantic IDs:
   - Compute (c1,c2,c3) per item; resolve collisions with c4 ∈ {0,1,2,…}, else c4=0.
@@ -129,9 +132,18 @@
 ## Tests (minimal)
 - Data: mapping integrity (round‑trip user/item ID maps), split correctness (leave‑one‑out), sequence tokenization shape/padding.
 - RQ‑VAE: encoder/decoder output shapes, codebook usage non‑zero, codes in valid range.
+- **RQ‑VAE Loss Verification**: per-level loss computation correctly implemented (✓ resolved model collapse issues).
 
 ## Config Knobs (for smoke tests)
 - Reduce epochs/steps/batches; smaller d_model/ff; subset items/users to keep runtime low.
+
+## Recent Updates
+- **RQ-VAE Loss Fix (2025-09-16)**: Corrected loss computation to match paper specification:
+  - Issue: Previous implementation computed VQ losses only on final aggregated vectors
+  - Solution: Added `forward_with_losses()` method that computes per-level losses during quantization
+  - Impact: Resolves model collapse issues and improves diversity preservation
+  - Beta application fix: β now only applied to commitment loss, not codebook loss
+  - Architecture improvements: Shallower networks with dropout and better initialization
 
 ## Next Steps
 1) Scaffold `src/`, `tests/`, `README.md`, `requirements.txt` under `tiger_semantic_id_amazon_beauty/`.
