@@ -69,17 +69,20 @@ class RQCodebook(nn.Module):
         quantized_sum = torch.zeros_like(residual)
         res = residual
         for l in range(self.levels):
+            # CRITICAL FIX: Normalize residual per level to prevent collapse
+            res_norm = res / (res.std(dim=0, keepdim=True) + 1e-6)
+
             emb = self.codebooks[l]  # [K, D]
             # find nearest neighbor
             # dist(x, e)^2 = |x|^2 + |e|^2 - 2 x.e
-            x2 = (res**2).sum(dim=1, keepdim=True)  # [B,1]
+            x2 = (res_norm**2).sum(dim=1, keepdim=True)  # [B,1]
             e2 = (emb**2).sum(dim=1)  # [K]
-            scores = x2 + e2 - 2 * res @ emb.t()  # [B,K]
+            scores = x2 + e2 - 2 * res_norm @ emb.t()  # [B,K]
             idx = scores.argmin(dim=1)
             codes.append(idx)
             q = F.embedding(idx, emb)
             quantized_sum = quantized_sum + q
-            res = res - q
+            res = res - q  # Update using original unnormalized residual
         codes = torch.stack(codes, dim=1)  # [B,L]
         return quantized_sum, codes
 
@@ -101,12 +104,15 @@ class RQCodebook(nn.Module):
         codebook_loss = 0.0
 
         for l in range(self.levels):
+            # CRITICAL FIX: Normalize residual per level to prevent collapse
+            res_norm = res / (res.std(dim=0, keepdim=True) + 1e-6)
+
             emb = self.codebooks[l]  # [K, D]
             # find nearest neighbor
             # dist(x, e)^2 = |x|^2 + |e|^2 - 2 x.e
-            x2 = (res**2).sum(dim=1, keepdim=True)  # [B,1]
+            x2 = (res_norm**2).sum(dim=1, keepdim=True)  # [B,1]
             e2 = (emb**2).sum(dim=1)  # [K]
-            scores = x2 + e2 - 2 * res @ emb.t()  # [B,K]
+            scores = x2 + e2 - 2 * res_norm @ emb.t()  # [B,K]
             idx = scores.argmin(dim=1)
             codes.append(idx)
             q = F.embedding(idx, emb)
@@ -116,7 +122,7 @@ class RQCodebook(nn.Module):
             codebook_loss += F.mse_loss(res, q.detach())  # ||r_l - sg[e_c_l]||²
 
             quantized_sum = quantized_sum + q
-            res = res - q
+            res = res - q  # Update using original unnormalized residual
 
         codes = torch.stack(codes, dim=1)  # [B,L]
         return quantized_sum, codes, commit_loss, codebook_loss
@@ -191,7 +197,11 @@ class RQVAE(nn.Module):
         )
         
         self.codebook = RQCodebook(cfg.levels, cfg.codebook_size, cfg.latent_dim)
-        
+
+        # Pre-quantization stabilization (NEW)
+        self.pre_q_ln = nn.LayerNorm(cfg.latent_dim)
+        self.pre_q_dropout = nn.Dropout(0.1)
+
         # Apply improved initialization
         self.apply(self._init_weights)
     
@@ -209,6 +219,10 @@ class RQVAE(nn.Module):
     def forward(self, x):
         x_n = self.normalize(x)
         z = self.encoder(x_n)
+        # Apply pre-quantization stabilization (NEW)
+        z = self.pre_q_ln(z)
+        if self.training:
+            z = self.pre_q_dropout(z)
         q, codes, commit_loss, codebook_loss = self.codebook.forward_with_losses(z)
         x_hat = self.decoder(q)
         recon = F.mse_loss(x_hat, x_n)   # reconstruct normalized space (simplest)
@@ -220,6 +234,47 @@ def fit_normalizer(model: RQVAE, data: torch.Tensor):
     model.x_mean.copy_(data.mean(dim=0, keepdim=True))
     model.x_std.copy_(data.std(dim=0, keepdim=True))
 
+@torch.no_grad()
+def revive_dead_codes(model: RQVAE, data: torch.Tensor, min_usage: int = 5):
+    """Revive dead or rarely-used codes by reinitializing them from high-variance data points."""
+    model.eval()
+
+    # Get all codes for the data
+    z = model.encoder(model.normalize(data))
+    z = model.pre_q_ln(z)  # Apply same normalization as in forward
+
+    # Compute residuals per level and track usage
+    res = z.clone()
+    for l in range(model.cfg.levels):
+        emb = model.codebook.codebooks[l]
+
+        # Find nearest codes
+        dist = torch.cdist(res, emb)
+        idx = dist.argmin(dim=1)
+
+        # Count usage
+        counts = torch.bincount(idx, minlength=model.cfg.codebook_size)
+        dead_codes = (counts < min_usage).nonzero(as_tuple=True)[0]
+
+        if len(dead_codes) > 0:
+            # Sample high-variance residuals to replace dead codes
+            # Use residuals with high L2 norm (far from current codebook)
+            residual_norms = (res ** 2).sum(dim=1)
+            _, high_var_idx = residual_norms.topk(min(len(dead_codes), len(res)))
+
+            # Reinitialize dead codes
+            n_revive = min(len(dead_codes), len(high_var_idx))
+            new_centers = res[high_var_idx[:n_revive]]
+            # Add small noise to avoid exact duplicates
+            new_centers = new_centers + 0.01 * torch.randn_like(new_centers)
+            model.codebook.codebooks[l][dead_codes[:n_revive]] = new_centers
+
+            print(f"  [Revival] Level {l}: revived {n_revive} codes (had <{min_usage} uses)")
+
+        # Update residual for next level
+        q = F.embedding(idx, emb)
+        res = res - q
+
 
 
 def train_rqvae(
@@ -229,6 +284,9 @@ def train_rqvae(
     batch_size: int = 1024,
     lr: float = 1e-3,  # safer default
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    revive_every: int = 10,  # revive dead codes every N epochs
+    revive_threshold: int = 5,  # codes with <N uses are considered dead
+    optimizer: str = "adam",  # NEW: allow choosing optimizer type
 ) -> RQVAE:
     model = model.to(device)
     data = data.to(device)
@@ -237,19 +295,29 @@ def train_rqvae(
     with torch.no_grad():
         fit_normalizer(model, data)
 
-    opt = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.99))
+    # CRITICAL FIX: Support Adagrad optimizer for better sparse codebook updates
+    if optimizer.lower() == "adagrad":
+        opt = torch.optim.Adagrad(model.parameters(), lr=lr)
+        print(f"Using Adagrad optimizer with lr={lr}")
+    else:
+        opt = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.99))
+        print(f"Using Adam optimizer with lr={lr}")
 
-    # K-means init on encoded, normalized residuals
+    # K-means init on encoded, normalized residuals (with pre_q_ln applied)
+    print("Initializing codebooks with k-means...")
     with torch.no_grad():
-        # draw up to batch_size samples
-        ridx = torch.randperm(data.shape[0], device=device)[:min(batch_size, data.shape[0])]
+        # draw up to 4096 samples for k-means
+        ridx = torch.randperm(data.shape[0], device=device)[:min(4096, data.shape[0])]
         sample = data[ridx]
         sample_n = model.normalize(sample)
         encoded_sample = model.encoder(sample_n)
+        encoded_sample = model.pre_q_ln(encoded_sample)  # Apply same normalization
         model.codebook.kmeans_init(encoded_sample)
+        print("K-means initialization complete")
 
     N = data.shape[0]
     for ep in range(1, epochs + 1):
+        model.train()
         perm = torch.randperm(N, device=device)
         total = 0.0
         for i in range(0, N, batch_size):
@@ -265,7 +333,16 @@ def train_rqvae(
             print(f"[RQVAE] epoch {ep}/{epochs} loss={total/N:.6f}")
             dists = code_usage(model, data)
             perplexities = [torch.exp(-(d * (d.clamp_min(1e-12).log())).sum()).item() for d in dists]
+            # Count active codes
+            active_counts = [(d > 0).sum().item() for d in dists]
             print(f"   usage perplexity per level: {perplexities}")
+            print(f"   active codes per level: {active_counts}")
+
+        # Revive dead codes periodically
+        if ep % revive_every == 0 and ep > 0:
+            print(f"[RQVAE] Checking for dead codes at epoch {ep}...")
+            revive_dead_codes(model, data, min_usage=revive_threshold)
+
     return model
 
 

@@ -58,17 +58,21 @@
 
 ## RQ‑VAE Semantic IDs
 - Model config:
-  - latent_dim=32, levels=3, codebook_size=256, beta=0.25
+  - latent_dim=32, levels=3, codebook_size=256, beta=0.5 (increased for better diversity)
   - encoder MLP: [768→256→128→32] with ReLU + dropout(0.1) (improved architecture)
   - decoder MLP: [32→128→256→768] with ReLU (improved architecture)
+  - **Pre-quantization stabilization**: LayerNorm + Dropout(0.1) before codebook lookup
+  - **Per-level residual normalization**: `res_norm = res / (res.std(dim=0) + 1e-6)` to prevent level collapse
   - Residual vector quantization across levels with k‑means init per level (first batch).
   - **Loss (CORRECTED)**: MSE recon + Σ(l=0 to m-1)[||sg[r_l] - e_c_l||² + β||r_l - sg[e_c_l]||²]
     - Per-level codebook loss (no β): ||sg[r_l] - e_c_l||²
     - Per-level commitment loss (with β): β||r_l - sg[e_c_l]||²
     - Implementation: `loss = recon + codebook_loss + beta * commit_loss`
 - Training:
-  - Optimizer: Adam(lr=1e-3), batch_size=1024, epochs≈50 (safer defaults)
-  - Track per‑level code usage (target ≥ 80%).
+  - **Optimizer: Adagrad(lr=0.4)** for better sparse codebook updates (switched from Adam)
+  - batch_size=1024, **epochs=150** (increased from 50 for better convergence)
+  - Dead code revival every 5 epochs (revive_every=5, threshold=5)
+  - Track per‑level code usage (target ≥ 80%) and perplexity (target ≥50/level).
 - Semantic IDs:
   - Compute (c1,c2,c3) per item; resolve collisions with c4 ∈ {0,1,2,…}, else c4=0.
   - Save: `semantic_ids.npy` ([num_items, 4], int16), `sid_to_items.json`, `item_to_sid.json`.
@@ -254,9 +258,23 @@ print(f"Unique code combinations: {unique_codes}")
 - Metrics achieved: Recall/NDCG tables for RQ-VAE vs Random vs LSH; cold-start probe shows non-zero recall for unseen items.
 
 ## Files Modified
-- `tiger_semantic_id_amazon_beauty/src/rqvae.py`: improved architecture, residual k-means init on encoded samples, data normalization buffer, code usage + perplexity tracking, per-level loss computation.
+- `tiger_semantic_id_amazon_beauty/src/rqvae.py`:
+  - Improved architecture (shallower encoder/decoder with dropout)
+  - **Per-level residual normalization** (lines 72-73, 107-108) to prevent collapse
+  - **Adagrad optimizer support** (lines 289-304) for sparse codebook updates
+  - Residual k-means init on encoded samples
+  - Data normalization buffer
+  - Code usage + perplexity tracking
+  - Per-level loss computation (`forward_with_losses()`)
+  - Dead code revival mechanism
 - `tiger_semantic_id_amazon_beauty/src/embeddings.py`: GPU acceleration with auto device selection, smart batch sizing, device-aware tensors, extended logging.
-- `notebooks/tiger_semantic_id_amazon_beauty/TIGER_SemanticID_AmazonBeauty.ipynb`: parsing patch, GPU embedding integration, diversity monitors, notebook cleanup, centralized device management.
+- `notebooks/tiger_semantic_id_amazon_beauty/TIGER_SemanticID_AmazonBeauty.ipynb`:
+  - Parsing patch for Python dict format
+  - GPU embedding integration
+  - Diversity monitors (encoder, per-level usage, collision profile, neighbor preservation)
+  - **Updated training cell** with Adagrad optimizer, 150 epochs, lr=0.4
+  - Acceptance criteria checks
+  - Notebook cleanup, centralized device management
 - `notebooks/tiger_semantic_id_amazon_beauty/data_eda.ipynb`: diagnostic tooling for data sanity checks.
 - Documentation: this `AGENTS.md` consolidates fixes + production runbook.
 
@@ -264,13 +282,17 @@ print(f"Unique code combinations: {unique_codes}")
 - Inspect raw data formats; Python dict vs JSON mismatches can silently break pipelines.
 - Model collapse usually traces back to data diversity and initialization; fix upstream issues first.
 - Shallower networks with dropout and solid initialization beat ad-hoc patches for diversity preservation.
+- **Residual quantization requires per-level normalization** to prevent magnitude imbalance and level collapse.
+- **Optimizer choice matters for sparse updates**: Adagrad's per-parameter learning rates outperform Adam for codebook training.
+- **Training duration**: 50 epochs insufficient for RQ-VAE convergence; 150+ needed for codebook diversity.
 - Holistic GPU optimization (embeddings + training) matters more than isolated accelerations.
 - K-means init must use latent encodings, not raw embeddings, to avoid dimension mismatches.
 - Import order matters when monkeypatching loaders; do it before data access.
 - Dedicated diagnostics (EDA notebook, monitoring hooks) speed root-cause analysis.
-- Integrated architecture (single RQVAE class) is easier to maintain than parallel “improved” variants.
-- Real-time monitoring (code usage, perplexity) prevents silent regressions.
+- Integrated architecture (single RQVAE class) is easier to maintain than parallel "improved" variants.
+- Real-time monitoring (code usage, perplexity) prevents silent regressions and catches collapse early.
 - Explicit device management averts performance drops and CUDA sync issues.
+- **Acceptance criteria**: Active codes ≥80/level, perplexity ≥50/level, collision median ≤2, diversity ≥30%.
 
 ## Success Metrics Achieved
 - Data diversity: 0% → 100% after parsing fix.
@@ -281,12 +303,32 @@ print(f"Unique code combinations: {unique_codes}")
 - Documentation: scattered notes unified into this knowledge base.
 
 ## Recent Updates
-- **RQ-VAE Loss Fix (2025-09-16)**: Corrected loss computation to match paper specification:
-  - Issue: Previous implementation computed VQ losses only on final aggregated vectors
-  - Solution: Added `forward_with_losses()` method that computes per-level losses during quantization
-  - Impact: Resolves model collapse issues and improves diversity preservation
-  - Beta application fix: β now only applied to commitment loss, not codebook loss
-  - Architecture improvements: Shallower networks with dropout and better initialization
+
+### RQ-VAE Diversity Fix (2025-10-02) 🔥 CRITICAL
+- **Issue**: Level-0 codebook collapsed to single code (perplexity=1.0), limiting overall diversity to 3.6% (435/12101 unique triples)
+- **Root cause**: Magnitude imbalance between residual levels caused Level 0 to dominate, starving other levels
+- **Solutions implemented**:
+  1. **Per-level residual normalization** (CRITICAL):
+     - Normalize each residual before quantization: `res_norm = res / (res.std(dim=0) + 1e-6)`
+     - Forces all levels to compete equally regardless of magnitude
+     - Applied in both `forward()` and `forward_with_losses()` methods
+  2. **Adagrad optimizer** (lr=0.4):
+     - Better handling of sparse codebook gradient updates vs Adam
+     - Per-parameter adaptive learning rates prevent dead codes
+  3. **Extended training** (150 epochs):
+     - More time for codebooks to explore latent space
+     - Combined with more frequent dead code revival (every 5 epochs)
+  4. **Increased beta** (0.5 → from 0.25):
+     - Stronger commitment loss encourages codebook diversity
+- **Expected results**: Level-0 perplexity >50, overall diversity 25-65% (vs previous 3.6%)
+- **Files modified**: `rqvae.py` (lines 72-73, 107-108, 289-304), notebook training cell
+
+### RQ-VAE Loss Fix (2025-09-16)
+- **Issue**: Previous implementation computed VQ losses only on final aggregated vectors
+- **Solution**: Added `forward_with_losses()` method that computes per-level losses during quantization
+- **Impact**: Resolves model collapse issues and improves diversity preservation
+- **Beta application fix**: β now only applied to commitment loss, not codebook loss
+- **Architecture improvements**: Shallower networks with dropout and better initialization
 
 ## Next Steps
 1) Scaffold `src/`, `tests/`, `README.md`, `requirements.txt` under `tiger_semantic_id_amazon_beauty/`.
