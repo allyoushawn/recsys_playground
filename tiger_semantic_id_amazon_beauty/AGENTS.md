@@ -61,7 +61,8 @@
   - latent_dim=32, levels=3, codebook_size=256, beta=0.25
   - encoder MLP: [768→256→128→32] with ReLU + dropout(0.1) (improved architecture)
   - decoder MLP: [32→128→256→768] with ReLU (improved architecture)
-  - **Pre-quantization stabilization**: LayerNorm + Dropout(0.1) before codebook lookup
+  - **CRITICAL**: NO LayerNorm (removed - amplifies low encoder variance ~0.005 into 400k+ distance explosion)
+  - Dropout(0.1) for regularization without normalization
   - Residual vector quantization across levels with k‑means init per level (first batch).
   - **Loss (CORRECTED)**: MSE recon + Σ(l=0 to m-1)[||sg[r_l] - e_c_l||² + β||r_l - sg[e_c_l]||²]
     - Per-level codebook loss (no β): ||sg[r_l] - e_c_l||²
@@ -282,10 +283,12 @@ print(f"Unique code combinations: {unique_codes}")
 - Inspect raw data formats; Python dict vs JSON mismatches can silently break pipelines.
 - Model collapse usually traces back to data diversity and initialization; fix upstream issues first.
 - Shallower networks with dropout and solid initialization beat ad-hoc patches for diversity preservation.
-- **Per-level residual normalization FAILS catastrophically**: Dividing by tiny encoder variance (~0.001) causes numerical explosion (400k+ distances) and total collapse. Standard RQ-VAE without normalization works better.
-- **Encoder collapse is the root cause**: When encoder outputs constant values (std ~0.001), no quantization trick can fix it. Must prevent encoder from learning degenerate solutions.
+- **LayerNorm on low-variance outputs causes numerical explosion**: When encoder std ~0.005, LayerNorm amplifies by ~200x, creating 400k+ distances. Remove all normalization before quantization.
+- **Low encoder variance is NORMAL, not a bug**: Neural network encoder outputs naturally have std ~0.005-0.01. This is fine - codebooks adapt to the scale. Don't try to "fix" it with normalization.
+- **Per-level residual normalization also fails**: Same issue as LayerNorm - dividing by small variance causes explosion. Keep residual quantization simple.
 - **High beta causes encoder collapse**: Strong commitment loss (β=0.5) encourages encoder to match codebook centers, leading to constant outputs. Keep β=0.25 or lower.
 - **High learning rate + Adagrad is dangerous**: lr=0.4 with Adagrad causes rapid convergence to local minima. Adam with lr=1e-3 is safer and more stable.
+- **Monitor MSE and encoder std during training**: MSE stuck at ~1.0 and encoder std <0.01 are red flags for collapse.
 - Holistic GPU optimization (embeddings + training) matters more than isolated accelerations.
 - K-means init must use latent encodings, not raw embeddings, to avoid dimension mismatches.
 - Import order matters when monkeypatching loaders; do it before data access.
@@ -304,6 +307,34 @@ print(f"Unique code combinations: {unique_codes}")
 - Documentation: scattered notes unified into this knowledge base.
 
 ## Recent Updates
+
+### LayerNorm Numerical Explosion Discovery (2025-10-03) 🔥 CRITICAL ROOT CAUSE
+
+**Problem:** All fixes to encoder collapse failed. Model still collapsed to single code [152, 69, 0] with 0.0% diversity.
+
+**Breakthrough Discovery:** LayerNorm was the root cause all along!
+
+**The Vicious Cycle:**
+1. Encoder outputs have low variance (std ~0.005) - this is actually NORMAL for neural networks
+2. LayerNorm divides by this small std to normalize: `y = (x - mean) / (std + eps)`
+3. Division by ~0.005 amplifies magnitudes by ~200x
+4. After LayerNorm, distances explode from ~0.05 to ~400,000+
+5. Distance computation breaks → all items assigned to same code
+6. Gradients die → encoder learns to output constant
+
+**Evidence:**
+- Diagnostic [1] showed encoder variance collapse (std=0.004-0.006)
+- Diagnostic [2] showed WITHOUT LayerNorm: 20 unique codes, WITH LayerNorm: 1 unique code
+- Diagnostic [4] showed 6-digit distances (287k+) instead of expected 1-10 range
+- MSE reconstruction stayed stuck at ~1.0 throughout training
+
+**Solution:**
+- **REMOVE LayerNorm entirely** - no pre-quantization normalization
+- Keep Dropout(0.1) for regularization
+- Let encoder outputs go directly to quantization with their natural small variance
+- Low encoder variance is FINE - the codebook will adapt to match the scale
+
+**Key Insight:** LayerNorm is designed for high-variance inputs. When applied to low-variance encoder outputs, it becomes a numerical explosion amplifier, not a stabilizer.
 
 ### RQ-VAE Encoder Collapse Discovery (2025-10-02) 🔥 CRITICAL - FAILED EXPERIMENT
 

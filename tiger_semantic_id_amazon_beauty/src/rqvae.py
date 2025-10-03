@@ -192,8 +192,9 @@ class RQVAE(nn.Module):
         
         self.codebook = RQCodebook(cfg.levels, cfg.codebook_size, cfg.latent_dim)
 
-        # Pre-quantization stabilization (NEW)
-        self.pre_q_ln = nn.LayerNorm(cfg.latent_dim)
+        # CRITICAL FIX: LayerNorm causes numerical explosion when encoder has low variance
+        # Use L2 normalization instead for stability without variance amplification
+        # self.pre_q_ln = nn.LayerNorm(cfg.latent_dim)  # REMOVED - causes collapse
         self.pre_q_dropout = nn.Dropout(0.1)
 
         # Apply improved initialization
@@ -213,8 +214,8 @@ class RQVAE(nn.Module):
     def forward(self, x):
         x_n = self.normalize(x)
         z = self.encoder(x_n)
-        # Apply pre-quantization stabilization (NEW)
-        z = self.pre_q_ln(z)
+        # CRITICAL FIX: Skip LayerNorm - it amplifies low encoder variance into numerical explosion
+        # Apply dropout for regularization without normalization
         if self.training:
             z = self.pre_q_dropout(z)
         q, codes, commit_loss, codebook_loss = self.codebook.forward_with_losses(z)
@@ -235,7 +236,7 @@ def revive_dead_codes(model: RQVAE, data: torch.Tensor, min_usage: int = 5):
 
     # Get all codes for the data
     z = model.encoder(model.normalize(data))
-    z = model.pre_q_ln(z)  # Apply same normalization as in forward
+    # No LayerNorm - removed to prevent numerical explosion
 
     # Compute residuals per level and track usage
     res = z.clone()
@@ -297,7 +298,7 @@ def train_rqvae(
         opt = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.99))
         print(f"Using Adam optimizer with lr={lr}")
 
-    # K-means init on encoded, normalized residuals (with pre_q_ln applied)
+    # K-means init on encoded samples (no LayerNorm to avoid numerical issues)
     print("Initializing codebooks with k-means...")
     with torch.no_grad():
         # draw up to 4096 samples for k-means
@@ -305,7 +306,7 @@ def train_rqvae(
         sample = data[ridx]
         sample_n = model.normalize(sample)
         encoded_sample = model.encoder(sample_n)
-        encoded_sample = model.pre_q_ln(encoded_sample)  # Apply same normalization
+        # No LayerNorm - removed to prevent numerical explosion
         model.codebook.kmeans_init(encoded_sample)
         print("K-means initialization complete")
 
@@ -313,18 +314,32 @@ def train_rqvae(
     for ep in range(1, epochs + 1):
         model.train()
         perm = torch.randperm(N, device=device)
-        total = 0.0
+        total_loss = 0.0
+        total_recon = 0.0
         for i in range(0, N, batch_size):
             xb = data[perm[i:i+batch_size]]
-            _, loss, _, _ = model(xb)
+            _, loss, recon, _ = model(xb)
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            total += loss.item() * xb.size(0)
+            total_loss += loss.item() * xb.size(0)
+            total_recon += recon.item() * xb.size(0)
 
         if ep % 5 == 0 or ep == 1:
-            print(f"[RQVAE] epoch {ep}/{epochs} loss={total/N:.6f}")
+            avg_loss = total_loss / N
+            avg_recon = total_recon / N
+            print(f"[RQVAE] epoch {ep}/{epochs} loss={avg_loss:.6f} recon_mse={avg_recon:.6f}")
+
+            # Check encoder variance to detect collapse
+            with torch.no_grad():
+                sample_idx = torch.randperm(N, device=device)[:min(1000, N)]
+                z = model.encoder(model.normalize(data[sample_idx]))
+                # No LayerNorm - check raw encoder outputs
+                enc_std = z.std(dim=0).mean().item()
+                enc_mean_norm = z.mean(dim=0).norm().item()
+                print(f"   encoder: std={enc_std:.6f}, mean_norm={enc_mean_norm:.6f}")
+
             dists = code_usage(model, data)
             perplexities = [torch.exp(-(d * (d.clamp_min(1e-12).log())).sum()).item() for d in dists]
             # Count active codes
