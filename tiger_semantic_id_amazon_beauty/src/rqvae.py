@@ -69,20 +69,17 @@ class RQCodebook(nn.Module):
         quantized_sum = torch.zeros_like(residual)
         res = residual
         for l in range(self.levels):
-            # CRITICAL FIX: Normalize residual per level to prevent collapse
-            res_norm = res / (res.std(dim=0, keepdim=True) + 1e-6)
-
             emb = self.codebooks[l]  # [K, D]
             # find nearest neighbor
             # dist(x, e)^2 = |x|^2 + |e|^2 - 2 x.e
-            x2 = (res_norm**2).sum(dim=1, keepdim=True)  # [B,1]
+            x2 = (res**2).sum(dim=1, keepdim=True)  # [B,1]
             e2 = (emb**2).sum(dim=1)  # [K]
-            scores = x2 + e2 - 2 * res_norm @ emb.t()  # [B,K]
+            scores = x2 + e2 - 2 * res @ emb.t()  # [B,K]
             idx = scores.argmin(dim=1)
             codes.append(idx)
             q = F.embedding(idx, emb)
             quantized_sum = quantized_sum + q
-            res = res - q  # Update using original unnormalized residual
+            res = res - q
         codes = torch.stack(codes, dim=1)  # [B,L]
         return quantized_sum, codes
 
@@ -104,15 +101,12 @@ class RQCodebook(nn.Module):
         codebook_loss = 0.0
 
         for l in range(self.levels):
-            # CRITICAL FIX: Normalize residual per level to prevent collapse
-            res_norm = res / (res.std(dim=0, keepdim=True) + 1e-6)
-
             emb = self.codebooks[l]  # [K, D]
             # find nearest neighbor
             # dist(x, e)^2 = |x|^2 + |e|^2 - 2 x.e
-            x2 = (res_norm**2).sum(dim=1, keepdim=True)  # [B,1]
+            x2 = (res**2).sum(dim=1, keepdim=True)  # [B,1]
             e2 = (emb**2).sum(dim=1)  # [K]
-            scores = x2 + e2 - 2 * res_norm @ emb.t()  # [B,K]
+            scores = x2 + e2 - 2 * res @ emb.t()  # [B,K]
             idx = scores.argmin(dim=1)
             codes.append(idx)
             q = F.embedding(idx, emb)
@@ -122,7 +116,7 @@ class RQCodebook(nn.Module):
             codebook_loss += F.mse_loss(res, q.detach())  # ||r_l - sg[e_c_l]||²
 
             quantized_sum = quantized_sum + q
-            res = res - q  # Update using original unnormalized residual
+            res = res - q
 
         codes = torch.stack(codes, dim=1)  # [B,L]
         return quantized_sum, codes, commit_loss, codebook_loss

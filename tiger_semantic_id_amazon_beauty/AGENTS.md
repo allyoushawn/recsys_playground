@@ -58,21 +58,21 @@
 
 ## RQ‑VAE Semantic IDs
 - Model config:
-  - latent_dim=32, levels=3, codebook_size=256, beta=0.5 (increased for better diversity)
+  - latent_dim=32, levels=3, codebook_size=256, beta=0.25
   - encoder MLP: [768→256→128→32] with ReLU + dropout(0.1) (improved architecture)
   - decoder MLP: [32→128→256→768] with ReLU (improved architecture)
   - **Pre-quantization stabilization**: LayerNorm + Dropout(0.1) before codebook lookup
-  - **Per-level residual normalization**: `res_norm = res / (res.std(dim=0) + 1e-6)` to prevent level collapse
   - Residual vector quantization across levels with k‑means init per level (first batch).
   - **Loss (CORRECTED)**: MSE recon + Σ(l=0 to m-1)[||sg[r_l] - e_c_l||² + β||r_l - sg[e_c_l]||²]
     - Per-level codebook loss (no β): ||sg[r_l] - e_c_l||²
     - Per-level commitment loss (with β): β||r_l - sg[e_c_l]||²
     - Implementation: `loss = recon + codebook_loss + beta * commit_loss`
 - Training:
-  - **Optimizer: Adagrad(lr=0.4)** for better sparse codebook updates (switched from Adam)
-  - batch_size=1024, **epochs=150** (increased from 50 for better convergence)
-  - Dead code revival every 5 epochs (revive_every=5, threshold=5)
-  - Track per‑level code usage (target ≥ 80%) and perplexity (target ≥50/level).
+  - **Optimizer: Adam(lr=1e-3)** with gradient clipping (max_norm=1.0)
+  - batch_size=1024, epochs=50
+  - Dead code revival every 10 epochs (revive_every=10, threshold=5)
+  - Track per‑level code usage (target ≥ 80%) and perplexity (target ≥50/level)
+  - **Monitor encoder diversity** (std should be >0.1 in latent space to prevent collapse).
 - Semantic IDs:
   - Compute (c1,c2,c3) per item; resolve collisions with c4 ∈ {0,1,2,…}, else c4=0.
   - Save: `semantic_ids.npy` ([num_items, 4], int16), `sid_to_items.json`, `item_to_sid.json`.
@@ -260,8 +260,7 @@ print(f"Unique code combinations: {unique_codes}")
 ## Files Modified
 - `tiger_semantic_id_amazon_beauty/src/rqvae.py`:
   - Improved architecture (shallower encoder/decoder with dropout)
-  - **Per-level residual normalization** (lines 72-73, 107-108) to prevent collapse
-  - **Adagrad optimizer support** (lines 289-304) for sparse codebook updates
+  - **REMOVED per-level residual normalization** (caused numerical explosion with 400k+ distances)
   - Residual k-means init on encoded samples
   - Data normalization buffer
   - Code usage + perplexity tracking
@@ -272,7 +271,8 @@ print(f"Unique code combinations: {unique_codes}")
   - Parsing patch for Python dict format
   - GPU embedding integration
   - Diversity monitors (encoder, per-level usage, collision profile, neighbor preservation)
-  - **Updated training cell** with Adagrad optimizer, 150 epochs, lr=0.4
+  - **Corrected training cell** with Adam optimizer (lr=1e-3), 50 epochs, beta=0.25
+  - Quantization mechanism verification diagnostics
   - Acceptance criteria checks
   - Notebook cleanup, centralized device management
 - `notebooks/tiger_semantic_id_amazon_beauty/data_eda.ipynb`: diagnostic tooling for data sanity checks.
@@ -282,9 +282,10 @@ print(f"Unique code combinations: {unique_codes}")
 - Inspect raw data formats; Python dict vs JSON mismatches can silently break pipelines.
 - Model collapse usually traces back to data diversity and initialization; fix upstream issues first.
 - Shallower networks with dropout and solid initialization beat ad-hoc patches for diversity preservation.
-- **Residual quantization requires per-level normalization** to prevent magnitude imbalance and level collapse.
-- **Optimizer choice matters for sparse updates**: Adagrad's per-parameter learning rates outperform Adam for codebook training.
-- **Training duration**: 50 epochs insufficient for RQ-VAE convergence; 150+ needed for codebook diversity.
+- **Per-level residual normalization FAILS catastrophically**: Dividing by tiny encoder variance (~0.001) causes numerical explosion (400k+ distances) and total collapse. Standard RQ-VAE without normalization works better.
+- **Encoder collapse is the root cause**: When encoder outputs constant values (std ~0.001), no quantization trick can fix it. Must prevent encoder from learning degenerate solutions.
+- **High beta causes encoder collapse**: Strong commitment loss (β=0.5) encourages encoder to match codebook centers, leading to constant outputs. Keep β=0.25 or lower.
+- **High learning rate + Adagrad is dangerous**: lr=0.4 with Adagrad causes rapid convergence to local minima. Adam with lr=1e-3 is safer and more stable.
 - Holistic GPU optimization (embeddings + training) matters more than isolated accelerations.
 - K-means init must use latent encodings, not raw embeddings, to avoid dimension mismatches.
 - Import order matters when monkeypatching loaders; do it before data access.
@@ -304,24 +305,67 @@ print(f"Unique code combinations: {unique_codes}")
 
 ## Recent Updates
 
-### RQ-VAE Diversity Fix (2025-10-02) 🔥 CRITICAL
-- **Issue**: Level-0 codebook collapsed to single code (perplexity=1.0), limiting overall diversity to 3.6% (435/12101 unique triples)
-- **Root cause**: Magnitude imbalance between residual levels caused Level 0 to dominate, starving other levels
-- **Solutions implemented**:
-  1. **Per-level residual normalization** (CRITICAL):
-     - Normalize each residual before quantization: `res_norm = res / (res.std(dim=0) + 1e-6)`
-     - Forces all levels to compete equally regardless of magnitude
-     - Applied in both `forward()` and `forward_with_losses()` methods
-  2. **Adagrad optimizer** (lr=0.4):
-     - Better handling of sparse codebook gradient updates vs Adam
-     - Per-parameter adaptive learning rates prevent dead codes
-  3. **Extended training** (150 epochs):
-     - More time for codebooks to explore latent space
-     - Combined with more frequent dead code revival (every 5 epochs)
-  4. **Increased beta** (0.5 → from 0.25):
-     - Stronger commitment loss encourages codebook diversity
-- **Expected results**: Level-0 perplexity >50, overall diversity 25-65% (vs previous 3.6%)
-- **Files modified**: `rqvae.py` (lines 72-73, 107-108, 289-304), notebook training cell
+### RQ-VAE Encoder Collapse Discovery (2025-10-02) 🔥 CRITICAL - FAILED EXPERIMENT
+
+**Initial Problem:** Level-0 codebook collapsed (perplexity=1.0), 3.6% diversity (435/12101 unique triples)
+
+**Attempted Fix (FAILED):**
+1. Per-level residual normalization: `res_norm = res / (res.std(dim=0) + 1e-6)`
+2. Adagrad optimizer (lr=0.4)
+3. Extended training (150 epochs)
+4. Increased beta (0.5)
+
+**Result:** COMPLETE COLLAPSE - 0.0% diversity (1/12101 unique triple), all items → [126, 110, 207]
+
+**Root Cause Discovery via Quantization Mechanism Diagnostics:**
+
+1. **Encoder Variance Collapse** (Primary Issue):
+   - Encoder outputs have extremely low variance: std ~0.001-0.005 across batch
+   - All items produce nearly identical latent codes
+   - Encoder converged to degenerate solution (outputs mean embedding for all inputs)
+   - **Diagnosis**: [1] ENCODER OUTPUT DIVERSITY showed std in range [0.0007, 0.005]
+
+2. **Residual Normalization Catastrophically Amplifies Problem**:
+   - WITHOUT norm: 14 unique codes (some diversity preserved)
+   - WITH norm: 1 unique code (total collapse)
+   - Dividing by tiny std (~0.001) creates numerical explosion
+   - Distance magnitudes explode to 400,000+ (vs expected ~1-10)
+   - **Diagnosis**: [2] RESIDUAL NORMALIZATION IMPACT showed 14 → 1 unique codes
+
+3. **Distance Computation Breakdown**:
+   - Normalized residuals have massive magnitude due to division by ~0.001
+   - Distance formula `||r_norm||² + ||e||² - 2⟨r_norm, e⟩` produces nonsensical values
+   - Min distances: [410296, 409418, 408253, ...] (should be 0-10 range)
+   - **Diagnosis**: [4] DISTANCE COMPUTATION showed 6-digit distances
+
+4. **Gradient Death**:
+   - Encoder grad norm: 0.0004 (4 orders of magnitude too small)
+   - Codebook grad norm: 0.01 (weak learning signal)
+   - Encoder converged to local minimum with no escape
+   - **Diagnosis**: [5] GRADIENT FLOW CHECK showed dead gradients
+
+**Vicious Cycle:**
+1. High lr (0.4) + Adagrad → encoder learns degenerate constant-output solution
+2. High beta (0.5) → strong commitment loss forces encoder to match codes, encouraging collapse
+3. LayerNorm + tiny encoder variance → numerical instability
+4. Residual normalization divides by ~0.001 → magnitude explosion
+5. Distance computation breaks → all items map to same code
+6. No learning signal → gradients die
+
+**Correct Solution:**
+1. ❌ REMOVE per-level residual normalization (causes numerical explosion)
+2. ✅ REVERT to Adam optimizer (lr=1e-3) - Adagrad too aggressive
+3. ✅ REDUCE beta to 0.25 - high beta encourages encoder collapse
+4. ✅ REDUCE epochs to 50 - longer training in bad basin doesn't help
+5. ✅ KEEP pre-quantization LayerNorm (not the problem)
+6. ✅ ADD encoder diversity monitoring to catch collapse early
+
+**Key Insight:** The original 3.6% diversity wasn't a quantization problem - it was an **encoder collapse problem**. Trying to fix quantization made it worse. Need to prevent encoder from learning constant outputs.
+
+**Diagnostic Tools Added:**
+- Quantization mechanism verification cell (checks encoder variance, normalization impact, codebook diversity, distance sanity, gradient flow)
+- Per-level usage/perplexity tracking
+- Encoder diversity analysis
 
 ### RQ-VAE Loss Fix (2025-09-16)
 - **Issue**: Previous implementation computed VQ losses only on final aggregated vectors
