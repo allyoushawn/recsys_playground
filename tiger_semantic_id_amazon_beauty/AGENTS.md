@@ -58,9 +58,9 @@
 
 ## RQ‑VAE Semantic IDs
 - Model config:
-  - latent_dim=32, levels=3, codebook_size=256, beta=0.25
-  - encoder MLP: [768→256→128→32] with ReLU + dropout(0.1) (improved architecture)
-  - decoder MLP: [32→128→256→768] with ReLU (improved architecture)
+  - latent_dim=128 (increased from 32 to reduce bottleneck), levels=3, codebook_size=256, beta=0.01 (reduced from 0.25 to preserve diversity)
+  - encoder MLP: [768→256→128→128] with ReLU + dropout(0.1) (improved architecture)
+  - decoder MLP: [128→128→256→768] with ReLU (improved architecture)
   - **CRITICAL**: NO LayerNorm (removed - amplifies low encoder variance ~0.005 into 400k+ distance explosion)
   - Dropout(0.1) for regularization without normalization
   - Residual vector quantization across levels with k‑means init per level (first batch).
@@ -286,9 +286,11 @@ print(f"Unique code combinations: {unique_codes}")
 - **LayerNorm on low-variance outputs causes numerical explosion**: When encoder std ~0.005, LayerNorm amplifies by ~200x, creating 400k+ distances. Remove all normalization before quantization.
 - **Low encoder variance is NORMAL, not a bug**: Neural network encoder outputs naturally have std ~0.005-0.01. This is fine - codebooks adapt to the scale. Don't try to "fix" it with normalization.
 - **Per-level residual normalization also fails**: Same issue as LayerNorm - dividing by small variance causes explosion. Keep residual quantization simple.
-- **High beta causes encoder collapse**: Strong commitment loss (β=0.5) encourages encoder to match codebook centers, leading to constant outputs. Keep β=0.25 or lower.
+- **Beta must be MUCH smaller than typically recommended**: Standard VQ-VAE uses β=0.25, but for RQ-VAE this destroys diversity. Use β=0.01 or lower. High beta forces encoder to output values near codebook centers, collapsing diversity from 98% to 10%.
+- **VQ losses compete with reconstruction**: Commit loss + codebook loss can overwhelm reconstruction loss, preventing the model from learning good representations. Monitor the balance between reconstruction and VQ losses.
+- **Use diagnostic tests to isolate issues**: Test (1) pure autoencoder, (2) quantization without VQ losses, (3) full model to pinpoint where gradient flow breaks.
 - **High learning rate + Adagrad is dangerous**: lr=0.4 with Adagrad causes rapid convergence to local minima. Adam with lr=1e-3 is safer and more stable.
-- **Monitor MSE and encoder std during training**: MSE stuck at ~1.0 and encoder std <0.01 are red flags for collapse.
+- **Monitor MSE and encoder std during training**: MSE stuck at ~1.0 and encoder std <0.01 are red flags for collapse. But also check diversity - MSE can be stuck while diversity is fine (indicates VQ loss issue).
 - Holistic GPU optimization (embeddings + training) matters more than isolated accelerations.
 - K-means init must use latent encodings, not raw embeddings, to avoid dimension mismatches.
 - Import order matters when monkeypatching loaders; do it before data access.
@@ -307,6 +309,48 @@ print(f"Unique code combinations: {unique_codes}")
 - Documentation: scattered notes unified into this knowledge base.
 
 ## Recent Updates
+
+### VQ Loss Destroying Diversity Discovery (2025-10-04) 🔥 CRITICAL
+
+**Problem:** Even after fixing LayerNorm, diversity remained poor (10.8%) and MSE stuck at 1.0.
+
+**Diagnostic Approach:** Tested 3 configurations to isolate the issue:
+1. **Pure autoencoder** (no quantization): MSE 1.86 → 0.49 ✅
+2. **With quantization, no VQ losses**: MSE 1.71 → 0.79, Diversity 98.3% ✅
+3. **With quantization + VQ losses (beta=0.25)**: MSE stuck at 1.0, Diversity 10.8% ❌
+
+**Root Cause Discovery:**
+
+The VQ losses (commit_loss + codebook_loss) are **competing with reconstruction**:
+- Reconstruction loss: "Make encoder diverse to represent different items"
+- Codebook loss: "Move residuals toward codebook centers"
+- Commit loss (beta=0.25): "Move codebook centers toward residuals"
+
+**When combined, beta=0.25 is TOO STRONG:**
+- Encoder learns to output values close to codebook centers (minimize commit loss)
+- This collapses encoder diversity
+- Only 1,308 unique codes used (10.8%) instead of 11,897 (98.3%)
+- MSE penalty: VQ losses add 0.21 to MSE vs reconstruction-only training
+
+**Evidence:**
+
+| Configuration | Final MSE | Diversity | Unique Codes |
+|---------------|-----------|-----------|--------------|
+| No quantization | 0.49 | N/A | N/A |
+| Quant (no VQ loss) | 0.79 | 98.3% | 11,897/12,101 |
+| Quant + VQ (β=0.25) | 1.00 | 10.8% | 1,308/12,101 |
+
+**Solution:**
+- **Reduce beta from 0.25 → 0.01** (25x reduction)
+- VQ losses still provide quantization guidance but don't overwhelm reconstruction
+- Alternative: Use EMA (exponential moving average) for codebook updates instead of gradient-based
+
+**Key Insight:** In VQ-VAE, the commitment loss coefficient (beta) must be carefully tuned. Too high and it forces encoder collapse to minimize VQ losses at the expense of reconstruction quality and diversity.
+
+**Expected results with beta=0.01:**
+- MSE: 0.80-0.85 (close to no-VQ-loss baseline)
+- Diversity: 80-95% (8x improvement)
+- All 3 RQ levels active throughout training
 
 ### LayerNorm Numerical Explosion Discovery (2025-10-03) 🔥 CRITICAL ROOT CAUSE
 
