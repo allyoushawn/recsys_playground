@@ -287,9 +287,10 @@ print(f"Unique code combinations: {unique_codes}")
 - **LayerNorm on low-variance outputs causes numerical explosion**: When encoder std ~0.005, LayerNorm amplifies by ~200x, creating 400k+ distances. Remove all normalization before quantization.
 - **Low encoder variance is NORMAL, not a bug**: Neural network encoder outputs naturally have std ~0.005-0.01. This is fine - codebooks adapt to the scale. Don't try to "fix" it with normalization.
 - **Per-level residual normalization also fails**: Same issue as LayerNorm - dividing by small variance causes explosion. Keep residual quantization simple.
+- **Gradient-based codebook loss is fundamentally flawed for RQ-VAE**: Even alpha=0.001 causes collapse. The loss `||res - q.detach()||²` creates feedback loop pulling encoder toward codebook centers. Reconstruction gradients are too weak (chain rule attenuation) to compete. **Solution: Use EMA for codebook updates OR set alpha=0.**
 - **Beta must be MUCH smaller than typically recommended**: Standard VQ-VAE uses β=0.25, but for RQ-VAE this destroys diversity. Use β=0.01 or lower. High beta forces encoder to output values near codebook centers, collapsing diversity from 98% to 10%.
-- **VQ losses compete with reconstruction**: Commit loss + codebook loss can overwhelm reconstruction loss, preventing the model from learning good representations. Monitor the balance between reconstruction and VQ losses.
-- **Use diagnostic tests to isolate issues**: Test (1) pure autoencoder, (2) quantization without VQ losses, (3) full model to pinpoint where gradient flow breaks.
+- **VQ losses compete with reconstruction**: Commit loss + codebook loss can overwhelm reconstruction loss, preventing the model from learning good representations. For best results: alpha=0, beta=0 (pure reconstruction) achieves MSE=0.79 and 98% diversity.
+- **Use diagnostic tests to isolate issues**: Test (1) pure autoencoder, (2) quantization without VQ losses, (3) full model to pinpoint where gradient flow breaks. Systematic experimentation reveals root causes.
 - **High learning rate + Adagrad is dangerous**: lr=0.4 with Adagrad causes rapid convergence to local minima. Adam with lr=1e-3 is safer and more stable.
 - **Monitor MSE and encoder std during training**: MSE stuck at ~1.0 and encoder std <0.01 are red flags for collapse. But also check diversity - MSE can be stuck while diversity is fine (indicates VQ loss issue).
 - Holistic GPU optimization (embeddings + training) matters more than isolated accelerations.
@@ -310,6 +311,30 @@ print(f"Unique code combinations: {unique_codes}")
 - Documentation: scattered notes unified into this knowledge base.
 
 ## Recent Updates
+
+### Codebook Loss Gradient Feedback Loop Discovery (2025-10-04) 🔥 CRITICAL - LATEST
+
+**Problem:** Even with alpha=0.001 (extremely small codebook loss weight), MSE stuck at 1.0 and diversity collapsed to 30%.
+
+**Discovery:** The codebook loss `||res - q.detach()||²` creates a **gradient feedback loop** that pulls encoder outputs toward codebook centers, even with tiny weights.
+
+**Why tiny alpha has huge impact:**
+1. Codebook loss gradients: `∇_encoder = 2α(res - q)` directly affect encoder
+2. Reconstruction gradients are weak (chain rule attenuation through multi-layer decoder)
+3. Even 0.001× codebook loss is enough to dominate and bias encoder
+4. Creates vicious cycle: encoder → codebook centers → less diversity → poor reconstruction
+
+**Experimental evidence:**
+
+| Config | Alpha | Beta | Final MSE | Diversity | Interpretation |
+|--------|-------|------|-----------|-----------|----------------|
+| Pure reconstruction | 0.0 | 0.0 | 0.79 | 98.3% | ✅ Optimal |
+| Tiny codebook loss | 0.001 | 0.0 | 1.00 | 29.9% | ❌ Still breaks |
+| Standard VQ-VAE | 1.0 | 0.01 | 1.00 | 10.8% | ❌ Worse |
+
+**Root cause:** VQ losses should guide **codebook placement**, not **encoder outputs**. Using gradient-based codebook loss is backwards - it forces encoder to match codebook instead of codebook adapting to encoder.
+
+**Solution:** Use **EMA (Exponential Moving Average)** for codebook updates instead of gradient-based loss, OR set alpha=0, beta=0 for pure reconstruction. See "Next Steps" section.
 
 ### VQ Loss Destroying Diversity Discovery (2025-10-04) 🔥 CRITICAL
 
@@ -451,6 +476,52 @@ The VQ losses (commit_loss + codebook_loss) are **competing with reconstruction*
 - **Architecture improvements**: Shallower networks with dropout and better initialization
 
 ## Next Steps
-1) Scaffold `src/`, `tests/`, `README.md`, `requirements.txt` under `tiger_semantic_id_amazon_beauty/`.
-2) Create `notebooks/tiger_semantic_id_amazon_beauty/TIGER_SemanticID_AmazonBeauty.ipynb` with sections 0–11 implemented.
-3) Add minimal tests and pin requirements; validate smoke‑test run in Colab.
+
+### Immediate: Fix VQ Loss Issue
+
+**Problem discovered:** Even tiny codebook loss (alpha=0.001) causes encoder collapse and MSE to stuck at 1.0.
+
+**Root cause:** Codebook loss `||res - q.detach()||²` creates gradient feedback that pulls encoder outputs toward codebook centers, causing diversity collapse even with very small alpha. Reconstruction gradients are weak (chain rule attenuation through decoder), so VQ gradients dominate.
+
+**Evidence:**
+- alpha=0.0, beta=0.0: MSE=0.79, Diversity=98% ✅
+- alpha=0.001, beta=0.0: MSE=1.0, Diversity=30% ❌
+- alpha=1.0, beta=0.01: MSE=1.0, Diversity=10.8% ❌
+
+**Recommended solution:**
+
+**Option 1: Remove VQ losses, use pure reconstruction (FASTEST)**
+```python
+# In config
+rqvae_alpha: float = 0.0  # No codebook loss
+rqvae_beta: float = 0.0   # No commitment loss
+```
+Expected: MSE=0.80-0.85, Diversity=90-98%, all 3 levels active
+
+**Option 2: Implement EMA codebook updates (BEST PRACTICE)**
+
+Replace gradient-based codebook loss with exponential moving average updates:
+```python
+# In RQCodebook.forward_with_losses()
+# Instead of: codebook_loss = ||res - q.detach()||²
+# Use EMA update (no gradients):
+with torch.no_grad():
+    codebook[idx] = 0.99 * codebook[idx] + 0.01 * res.detach()
+```
+
+This is the standard VQ-VAE approach - decouples codebook learning from encoder gradients.
+
+**Option 3: Keep tiny commitment loss only (COMPROMISE)**
+```python
+alpha = 0.0      # No codebook loss
+beta = 0.001     # Minimal commitment loss for stability
+```
+Commitment loss doesn't directly affect encoder, only encourages encoder/decoder consistency.
+
+**Key insight:** VQ losses should guide **codebook placement**, not **encoder outputs**. Gradient-based codebook loss pulls encoder toward codebook (backwards!), causing collapse. Use EMA or remove VQ losses entirely.
+
+### Future Work
+1) Implement EMA codebook updates as alternative to gradient-based VQ losses
+2) Compare: (a) pure reconstruction vs (b) EMA updates vs (c) gradient VQ losses
+3) Evaluate downstream seq2seq performance with different training approaches
+4) Add minimal tests and validate smoke‑test run in Colab
