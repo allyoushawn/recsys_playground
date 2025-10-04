@@ -144,7 +144,8 @@ class RQVAEConfig:
     latent_dim: int = 32
     levels: int = 3
     codebook_size: int = 256
-    beta: float = 0.25
+    beta: float = 0.25  # commitment loss weight
+    alpha: float = 1.0  # codebook loss weight
 
 @torch.no_grad()
 def code_usage(model: RQVAE, data: torch.Tensor, max_batches: int = 4, bs: int = 4096):
@@ -221,7 +222,7 @@ class RQVAE(nn.Module):
         q, codes, commit_loss, codebook_loss = self.codebook.forward_with_losses(z)
         x_hat = self.decoder(q)
         recon = F.mse_loss(x_hat, x_n)   # reconstruct normalized space (simplest)
-        loss = recon + codebook_loss + self.cfg.beta * commit_loss
+        loss = recon + self.cfg.alpha * codebook_loss + self.cfg.beta * commit_loss
         return x_hat, loss, recon, codes
 
 @torch.no_grad()

@@ -58,16 +58,17 @@
 
 ## RQ‑VAE Semantic IDs
 - Model config:
-  - latent_dim=128 (increased from 32 to reduce bottleneck), levels=3, codebook_size=256, beta=0.01 (reduced from 0.25 to preserve diversity)
+  - latent_dim=128 (increased from 32 to reduce bottleneck), levels=3, codebook_size=256
+  - **Loss weights**: alpha=1.0 (codebook loss), beta=0.01 (commitment loss, reduced from 0.25 to preserve diversity)
   - encoder MLP: [768→256→128→128] with ReLU + dropout(0.1) (improved architecture)
   - decoder MLP: [128→128→256→768] with ReLU (improved architecture)
   - **CRITICAL**: NO LayerNorm (removed - amplifies low encoder variance ~0.005 into 400k+ distance explosion)
   - Dropout(0.1) for regularization without normalization
   - Residual vector quantization across levels with k‑means init per level (first batch).
-  - **Loss (CORRECTED)**: MSE recon + Σ(l=0 to m-1)[||sg[r_l] - e_c_l||² + β||r_l - sg[e_c_l]||²]
-    - Per-level codebook loss (no β): ||sg[r_l] - e_c_l||²
-    - Per-level commitment loss (with β): β||r_l - sg[e_c_l]||²
-    - Implementation: `loss = recon + codebook_loss + beta * commit_loss`
+  - **Loss (CORRECTED)**: MSE recon + Σ(l=0 to m-1)[α·||sg[r_l] - e_c_l||² + β·||r_l - sg[e_c_l]||²]
+    - Per-level codebook loss (weight α): α·||sg[r_l] - e_c_l||²
+    - Per-level commitment loss (weight β): β·||r_l - sg[e_c_l]||²
+    - Implementation: `loss = recon + alpha * codebook_loss + beta * commit_loss`
 - Training:
   - **Optimizer: Adam(lr=1e-3)** with gradient clipping (max_norm=1.0)
   - batch_size=1024, epochs=50
