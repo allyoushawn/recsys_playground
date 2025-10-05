@@ -220,7 +220,13 @@ class RQVAE(nn.Module):
         if self.training:
             z = self.pre_q_dropout(z)
         q, codes, commit_loss, codebook_loss = self.codebook.forward_with_losses(z)
-        x_hat = self.decoder(q)
+
+        # CRITICAL: Straight-through estimator for gradient flow to encoder
+        # Forward pass: use quantized q
+        # Backward pass: treat quantization as identity, gradients flow to z
+        q_st = z + (q - z).detach()
+
+        x_hat = self.decoder(q_st)
         recon = F.mse_loss(x_hat, x_n)   # reconstruct normalized space (simplest)
         loss = recon + self.cfg.alpha * codebook_loss + self.cfg.beta * commit_loss
         return x_hat, loss, recon, codes

@@ -312,7 +312,70 @@ print(f"Unique code combinations: {unique_codes}")
 
 ## Recent Updates
 
-### Codebook Loss Gradient Feedback Loop Discovery (2025-10-04) 🔥 CRITICAL - LATEST
+### Missing Straight-Through Estimator Discovery (2025-10-05) 🔥 CRITICAL - LATEST
+
+**Problem:** All previous attempts to train RQ-VAE failed because the encoder received NO gradients from reconstruction loss.
+
+**Root Cause Discovery:** The implementation was **missing the straight-through estimator (STE)**!
+
+**Gradient Flow Analysis:**
+```python
+# Line 222: Quantization (discrete operation)
+q, codes, commit_loss, codebook_loss = self.codebook.forward_with_losses(z)
+
+# Line 223: Decoder uses quantized q
+x_hat = self.decoder(q)
+
+# Line 224: Reconstruction loss
+recon = F.mse_loss(x_hat, x_n)
+```
+
+**The Problem:**
+1. Reconstruction gradients: `∂recon/∂x_hat` → decoder → `∂decoder/∂q`
+2. But `q` comes from **discrete operations** (`argmin` + `embedding` lookup in line 110-112)
+3. **NO gradient can flow from `q` back to encoder `z`** - discrete ops are non-differentiable!
+4. Encoder only received gradients from VQ losses:
+   - `commit_loss = ||res.detach() - q||²` → updates codebook only (encoder detached!)
+   - `codebook_loss = ||res - q.detach()||²` → updates encoder only
+
+**Why All Previous Experiments Failed:**
+
+| Configuration | Encoder Gradients From | Result |
+|---------------|------------------------|--------|
+| alpha=0, beta=0 | NOTHING | Encoder frozen at k-means init, decoder learned on fixed codes |
+| alpha=0.001, beta=0 | codebook_loss only | Encoder pulled toward codebook centers, collapsed to 30% diversity |
+| alpha=1.0, beta=0.01 | codebook_loss only | Encoder fully collapsed to 10.8% diversity |
+
+**The "success" with alpha=0, beta=0 (MSE=0.79, 98% diversity) was misleading:**
+- Encoder never trained - stayed at k-means initialization
+- Only decoder learned to map fixed quantized codes back to embeddings
+- Good diversity came from k-means, not from training
+- **Not a real RQ-VAE** - just a decoder on top of clustering!
+
+**Solution - Implement Straight-Through Estimator:**
+```python
+# In RQVAE.forward() at line 227 (rqvae.py)
+# Forward pass: use quantized q
+# Backward pass: treat quantization as identity
+q_st = z + (q - z).detach()
+
+x_hat = self.decoder(q_st)
+```
+
+**How STE works:**
+- Forward: `q_st = z + (q - z) = q` (uses quantized values)
+- Backward: `∂q_st/∂z = 1 + 0 = I` (gradient flows as if quantization is identity)
+- Now reconstruction gradients flow: `∂recon/∂x_hat` → decoder → `∂decoder/∂q_st` → **encoder** ✅
+
+**Impact:**
+- Encoder now receives gradients from **both** reconstruction loss AND codebook_loss
+- Can use standard VQ-VAE hyperparameters (alpha=1.0, beta=0.25)
+- Encoder learns to balance: (1) good reconstruction, (2) quantization-friendly representations
+- No more gradient starvation or feedback loop dominance
+
+**Key Insight:** Without STE, VQ-VAE cannot work. The discrete quantization operation must have a "straight-through" path for gradients during backprop, otherwise encoder has no reconstruction signal.
+
+### Codebook Loss Gradient Feedback Loop Discovery (2025-10-04) 🔥 CRITICAL
 
 **Problem:** Even with alpha=0.001 (extremely small codebook loss weight), MSE stuck at 1.0 and diversity collapsed to 30%.
 
@@ -328,13 +391,13 @@ print(f"Unique code combinations: {unique_codes}")
 
 | Config | Alpha | Beta | Final MSE | Diversity | Interpretation |
 |--------|-------|------|-----------|-----------|----------------|
-| Pure reconstruction | 0.0 | 0.0 | 0.79 | 98.3% | ✅ Optimal |
+| Pure reconstruction | 0.0 | 0.0 | 0.79 | 98.3% | ✅ Encoder frozen at k-means (misleading!) |
 | Tiny codebook loss | 0.001 | 0.0 | 1.00 | 29.9% | ❌ Still breaks |
 | Standard VQ-VAE | 1.0 | 0.01 | 1.00 | 10.8% | ❌ Worse |
 
-**Root cause:** VQ losses should guide **codebook placement**, not **encoder outputs**. Using gradient-based codebook loss is backwards - it forces encoder to match codebook instead of codebook adapting to encoder.
+**NOTE:** These experiments were conducted WITHOUT straight-through estimator, so encoder had no reconstruction gradients. The interpretations above are now superseded by STE discovery.
 
-**Solution:** Use **EMA (Exponential Moving Average)** for codebook updates instead of gradient-based loss, OR set alpha=0, beta=0 for pure reconstruction. See "Next Steps" section.
+**Root cause (REVISED with STE):** Without STE, encoder only receives gradients from VQ losses. Even tiny codebook_loss dominates because there are no reconstruction gradients to compete with.
 
 ### VQ Loss Destroying Diversity Discovery (2025-10-04) 🔥 CRITICAL
 
@@ -477,26 +540,46 @@ The VQ losses (commit_loss + codebook_loss) are **competing with reconstruction*
 
 ## Next Steps
 
-### Immediate: Fix VQ Loss Issue
+### Immediate: Test Straight-Through Estimator Fix ✅ IMPLEMENTED
 
-**Problem discovered:** Even tiny codebook loss (alpha=0.001) causes encoder collapse and MSE to stuck at 1.0.
+**Fix Applied (2025-10-05):** Implemented straight-through estimator in `rqvae.py:227`
 
-**Root cause:** Codebook loss `||res - q.detach()||²` creates gradient feedback that pulls encoder outputs toward codebook centers, causing diversity collapse even with very small alpha. Reconstruction gradients are weak (chain rule attenuation through decoder), so VQ gradients dominate.
-
-**Evidence:**
-- alpha=0.0, beta=0.0: MSE=0.79, Diversity=98% ✅
-- alpha=0.001, beta=0.0: MSE=1.0, Diversity=30% ❌
-- alpha=1.0, beta=0.01: MSE=1.0, Diversity=10.8% ❌
-
-**Recommended solution:**
-
-**Option 1: Remove VQ losses, use pure reconstruction (FASTEST)**
 ```python
-# In config
-rqvae_alpha: float = 0.0  # No codebook loss
-rqvae_beta: float = 0.0   # No commitment loss
+# CRITICAL: Straight-through estimator for gradient flow to encoder
+# Forward pass: use quantized q
+# Backward pass: treat quantization as identity, gradients flow to z
+q_st = z + (q - z).detach()
+
+x_hat = self.decoder(q_st)
 ```
-Expected: MSE=0.80-0.85, Diversity=90-98%, all 3 levels active
+
+**Expected behavior with STE:**
+- Encoder now receives gradients from reconstruction loss
+- Can use standard VQ-VAE hyperparameters: alpha=1.0, beta=0.25
+- Encoder learns to balance reconstruction quality + quantization-friendly representations
+- Should see: MSE improving during training, diversity maintained at 80%+
+
+**Test plan:**
+1. Re-run training with alpha=1.0, beta=0.25 (standard VQ-VAE config)
+2. Monitor both MSE improvement AND diversity preservation
+3. Compare gradient norms: encoder should now have non-zero gradients from reconstruction
+4. Validate that encoder is actually learning (not frozen at k-means init)
+
+**If STE works:**
+- MSE should converge to 0.1-0.5 (much better than 1.0)
+- Diversity should stay at 70-90% (codebook_loss will pull it down slightly from 98%)
+- Both encoder and decoder actively training (not just decoder)
+
+**If issues persist:**
+- May need to tune alpha/beta balance
+- Consider implementing EMA codebook updates as Option 2 below
+
+### Future Options (if STE needs refinement)
+
+**Option 1: Tune VQ loss weights**
+- Start with alpha=1.0, beta=0.25 (standard)
+- If diversity drops too much, reduce alpha to 0.1-0.5
+- If codebook doesn't learn well, increase beta slightly
 
 **Option 2: Implement EMA codebook updates (BEST PRACTICE)**
 
@@ -509,19 +592,11 @@ with torch.no_grad():
     codebook[idx] = 0.99 * codebook[idx] + 0.01 * res.detach()
 ```
 
-This is the standard VQ-VAE approach - decouples codebook learning from encoder gradients.
-
-**Option 3: Keep tiny commitment loss only (COMPROMISE)**
-```python
-alpha = 0.0      # No codebook loss
-beta = 0.001     # Minimal commitment loss for stability
-```
-Commitment loss doesn't directly affect encoder, only encourages encoder/decoder consistency.
-
-**Key insight:** VQ losses should guide **codebook placement**, not **encoder outputs**. Gradient-based codebook loss pulls encoder toward codebook (backwards!), causing collapse. Use EMA or remove VQ losses entirely.
+This is the standard VQ-VAE approach - decouples codebook learning from encoder gradients. With EMA, set alpha=0 (no gradient-based codebook loss) and keep beta for commitment.
 
 ### Future Work
-1) Implement EMA codebook updates as alternative to gradient-based VQ losses
-2) Compare: (a) pure reconstruction vs (b) EMA updates vs (c) gradient VQ losses
-3) Evaluate downstream seq2seq performance with different training approaches
-4) Add minimal tests and validate smoke‑test run in Colab
+1) Validate STE fix with full training run
+2) If needed, implement EMA codebook updates
+3) Compare: (a) STE + gradient VQ losses vs (b) STE + EMA updates
+4) Evaluate downstream seq2seq performance with different training approaches
+5) Add minimal tests and validate smoke‑test run in Colab
