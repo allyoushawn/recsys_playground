@@ -31,12 +31,13 @@ def load_dialogs(path: str) -> list[dict]:
     return dialogs
 
 
-def preprocess_dialog(example: dict, tokenizer) -> dict:
+def preprocess_dialog(example: dict, tokenizer, max_length: int = 512) -> dict:
     """Convert dialog to tokenized format for causal LM.
 
     Args:
         example: Dict with "messages" key
         tokenizer: Tokenizer instance
+        max_length: Maximum sequence length
 
     Returns:
         Dict with "input_ids", "attention_mask", "labels"
@@ -50,16 +51,23 @@ def preprocess_dialog(example: dict, tokenizer) -> dict:
         add_generation_prompt=False,
     )
 
-    # Tokenize
+    # Tokenize with padding to max_length
     encoded = tokenizer(
         text,
         truncation=True,
-        max_length=512,
-        padding=False,
+        max_length=max_length,
+        padding="max_length",  # Pad to max_length for consistent batch sizes
+        return_tensors=None,  # Return lists, not tensors
     )
 
     # For causal LM, labels = input_ids
-    encoded["labels"] = encoded["input_ids"].copy()
+    # Set padding token labels to -100 so they're ignored in loss
+    labels = encoded["input_ids"].copy()
+    labels = [
+        -100 if token_id == tokenizer.pad_token_id else token_id
+        for token_id in labels
+    ]
+    encoded["labels"] = labels
 
     return encoded
 
@@ -187,22 +195,22 @@ def main():
 
     # Preprocess
     print("\nPreprocessing...")
+    max_length = 512
     train_dataset = train_dataset.map(
-        lambda x: preprocess_dialog(x, tokenizer),
+        lambda x: preprocess_dialog(x, tokenizer, max_length=max_length),
         remove_columns=train_dataset.column_names,
         desc="Preprocessing train",
     )
     valid_dataset = valid_dataset.map(
-        lambda x: preprocess_dialog(x, tokenizer),
+        lambda x: preprocess_dialog(x, tokenizer, max_length=max_length),
         remove_columns=valid_dataset.column_names,
         desc="Preprocessing valid",
     )
 
-    # Data collator
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,  # Causal LM
-    )
+    # Data collator - no need for padding since we already padded
+    # Use default data collator that just converts to tensors
+    from transformers import default_data_collator
+    data_collator = default_data_collator
 
     # Training arguments
     training_args = TrainingArguments(
