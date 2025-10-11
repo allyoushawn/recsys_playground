@@ -11,8 +11,15 @@ tqdm>=4.65
 matplotlib>=3.7
 umap-learn>=0.5.4
 
-# Optional (fast JSON)
-# orjson>=3.9
+# LLM Fine-tuning
+accelerate>=0.26
+peft>=0.8
+datasets>=2.16
+bitsandbytes>=0.41
+tiktoken>=0.5
+sentencepiece>=0.1.99
+jsonlines>=4.0
+orjson>=3.9
 
 # Dev (tests)
 pytest>=7.3

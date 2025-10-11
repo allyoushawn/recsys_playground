@@ -642,8 +642,244 @@ with torch.no_grad():
 This is the standard VQ-VAE approach - decouples codebook learning from encoder gradients. With EMA, set alpha=0 (no gradient-based codebook loss) and keep beta for commitment.
 
 ### Future Work
-1) Validate STE fix with full training run
-2) If needed, implement EMA codebook updates
-3) Compare: (a) STE + gradient VQ losses vs (b) STE + EMA updates
-4) Evaluate downstream seq2seq performance with different training approaches
-5) Add minimal tests and validate smoke‑test run in Colab
+1) ✅ **COMPLETED**: Validate STE fix with full training run
+2) **LLM Fine-tuning Pipeline**: Qwen3-8B for SID recommendation (see below)
+3) If needed, implement EMA codebook updates
+4) Compare: (a) STE + gradient VQ losses vs (b) STE + EMA updates
+5) Evaluate downstream performance: Seq2Seq vs LLM-based recommendation
+6) Add minimal tests and validate smoke‑test run in Colab
+
+## LLM Fine-tuning Pipeline (Qwen3-8B for SID Recommendation)
+
+### Overview
+
+Fine-tune Qwen3-8B to generate Semantic IDs for next-item recommendation using a two-stage approach:
+- **Stage A (Vocabulary Extension)**: Fine-tune only embeddings to learn 1,027 new SID tokens
+- **Stage B (Full Fine-tuning)**: Fine-tune entire model on conversational recommendation task
+
+### Prerequisites: Pre-trained RQ-VAE Required
+
+**IMPORTANT**: This pipeline assumes you have **already trained the RQ-VAE** and generated semantic IDs.
+
+**Required artifacts from RQ-VAE training:**
+- `/content/artifacts/semantic_ids.npy` - [num_items, 4] array of codes
+- `/content/artifacts/sid_to_items.json` - Mapping "c1,c2,c3,c4" → list of item IDs
+- `/content/artifacts/item_to_sid.json` - Mapping item_id → [c1, c2, c3, c4]
+- `/content/artifacts/user_sequences.json` - User interaction histories (item IDs)
+
+**Pipeline relationship:**
+```
+┌─────────────────────────────────────────────────────────┐
+│ Step 1: RQ-VAE Training (Already Completed)            │
+│ ─────────────────────────────────────────────────────── │
+│ Input:  Item embeddings [num_items, 768]               │
+│ Train:  Encoder/Decoder/Codebooks                       │
+│ Output: Semantic IDs [num_items, 4]                     │
+│         Each item → (c1, c2, c3, c4) codes              │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+                  semantic_ids.npy
+                  sid_to_items.json
+                  item_to_sid.json
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ Step 2: LLM Fine-tuning (This Pipeline)                │
+│ ─────────────────────────────────────────────────────── │
+│ Input:  Pre-computed semantic IDs from Step 1          │
+│ Build:  Dialog data (history SIDs → next SID)          │
+│ Train:  Qwen3-8B to predict next SID from context      │
+│ Output: LLM that generates valid SIDs                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+**What the LLM learns:**
+- **NOT** how to encode items into SIDs (that's the RQ-VAE's job)
+- **DOES** learn sequential patterns in SID histories to predict next SID
+- Essentially a "language model" over the discrete SID vocabulary
+
+**Analogy:**
+- **RQ-VAE** = Tokenizer (maps items to codes, like BPE for text)
+- **LLM** = Language Model (predicts next token given context)
+
+### Package Structure
+
+```
+tiger_semantic_id_amazon_beauty/src/llm/
+├── __init__.py
+├── build_sid_dialogs.py       # Data → JSONL dialogs + trie
+├── tokenizer_resize_qwen.py   # Add 1,027 SID tokens
+├── constraints.py             # Level masks + trie constraints
+├── finetune_qwen_vocab.py     # Stage A: embeddings only
+├── finetune_qwen_full.py      # Stage B: full model
+└── inference_qwen.py          # Constrained SID generation
+```
+
+### Token Vocabulary
+
+**1,027 new tokens added:**
+- `<SID_START>`, `<SID_END>`, `<REC>` (3 special tokens)
+- `<sid_0>` through `<sid_1023>` (1,024 SID tokens)
+
+**Level token ranges:**
+- L1: `<sid_0>` to `<sid_255>` (first level codes)
+- L2: `<sid_256>` to `<sid_511>` (second level codes)
+- L3: `<sid_512>` to `<sid_767>` (third level codes)
+- L4: `<sid_768>` to `<sid_1023>` (collision codes)
+
+### Dialog Format
+
+**System prompt:**
+```
+You are a recommender that must reply ONLY with the next product's Semantic ID
+as 4 tokens in order: L1, L2, L3, L4.
+Valid token ranges by level:
+- L1: <sid_0>.. <sid_255>
+- L2: <sid_256>.. <sid_511>
+- L3: <sid_512>.. <sid_767>
+- L4: <sid_768>.. <sid_1023>
+Do not output anything else.
+```
+
+**User message (history of 3 items → 12 tokens):**
+```
+History:
+<sid_64> <sid_313> <sid_637> <sid_768>
+<sid_64> <sid_447> <sid_706> <sid_768>
+<sid_112> <sid_201> <sid_523> <sid_804>
+Recommend next:
+```
+
+**Assistant response (4 tokens):**
+```
+<sid_64> <sid_325> <sid_630> <sid_768>
+```
+
+### Constrained Decoding
+
+**Two-level constraints ensure valid SIDs:**
+
+1. **Level masks**: At each generation step (L1→L2→L3→L4), mask logits to only allow tokens from the current level's 256-token range.
+
+2. **Trie constraints**: For L2, L3, L4, further mask to only allow valid continuations from the trie built during data preprocessing:
+   - L2: Given `c1`, only allow `c2` values that exist in catalog
+   - L3: Given `(c1, c2)`, only allow `c3` values that exist
+   - L4: Given `(c1, c2, c3)`, only allow `c4` values that exist
+
+This guarantees **Invalid-ID@K = 0%** (all generated SIDs exist in catalog).
+
+### Training Recipe
+
+**Stage A: Vocabulary Extension (1 epoch, embeddings only)**
+```bash
+python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_vocab \
+  --data /content/artifacts/llm/dialogs_train.jsonl \
+  --valid /content/artifacts/llm/dialogs_valid.jsonl \
+  --in_model /content/artifacts/llm/qwen3_vocab_stage \
+  --out_model /content/artifacts/llm/qwen3_vocab_stage \
+  --per_device_train_batch_size 4 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 5e-4 \
+  --num_train_epochs 1 \
+  --bf16 \
+  --gradient_checkpointing
+```
+
+**Stage B: Full Fine-tuning (3 epochs, all parameters)**
+```bash
+python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_full \
+  --data /content/artifacts/llm/dialogs_train.jsonl \
+  --valid /content/artifacts/llm/dialogs_valid.jsonl \
+  --in_model /content/artifacts/llm/qwen3_vocab_stage \
+  --out_model /content/artifacts/llm/qwen3_full_stage \
+  --sid_trie /content/artifacts/llm/sid_trie.pkl \
+  --per_device_train_batch_size 2 \
+  --gradient_accumulation_steps 16 \
+  --learning_rate 1e-5 \
+  --num_train_epochs 3 \
+  --bf16 \
+  --gradient_checkpointing
+```
+
+### Inference
+
+```python
+from tiger_semantic_id_amazon_beauty.src.llm.inference_qwen import SIDRecommender
+
+# Load model
+recommender = SIDRecommender(
+    model_path='/content/artifacts/llm/qwen3_full_stage',
+    trie_path='/content/artifacts/llm/sid_trie.pkl',
+)
+
+# Generate from history
+history_sids = [
+    (91, 54, 165, 0),
+    (146, 204, 254, 0),
+    (225, 239, 96, 0),
+]
+
+generated_sid = recommender.generate_sid(history_sids=history_sids)
+# Returns: (c1, c2, c3, c4) tuple with codes in [0, 255]
+```
+
+### Artifacts
+
+**Outputs to `/content/artifacts/llm/`:**
+- `dialogs_train.jsonl`, `dialogs_valid.jsonl` - Training data
+- `sid_trie.pkl` - Valid continuation trie
+- `qwen3_vocab_stage/` - Stage A checkpoint (embeddings learned)
+- `qwen3_full_stage/` - Stage B checkpoint (final model)
+
+### Evaluation Metrics
+
+1. **Invalid-ID@K**: Fraction of generated SIDs that don't exist in catalog
+   - Target: 0% (enforced by constraints)
+
+2. **SID@K**: Whether generated (c1,c2,c3,c4) matches ground truth exactly
+   - Target: >0% (baseline comparison)
+
+3. **Item-level metrics**: Map SID to items and compute Recall@K, NDCG@K
+   - Compare with Seq2Seq transformer baseline
+
+4. **Qualitative**: Natural language prompts → valid SIDs → product titles
+   - E.g., "Recommend lipstick for dry skin" → SID → mapped items
+
+### Acceptance Criteria
+
+✅ **Stage A completes** and new tokens are learned (loss decreases)
+✅ **Stage B completes** with validation loss ↓
+✅ **Invalid-ID@1 = 0%** on eval set (thanks to masks + trie)
+✅ **SID@10 ≥ baseline** (compare with Seq2Seq)
+✅ **NL prompts** produce valid 4-token SIDs that map to plausible items
+
+### Resource Requirements
+
+- **GPU**: A100 (40GB) or V100 (32GB) recommended
+- **Memory**: ~25GB for bf16, ~45GB for fp32
+- **Training time**:
+  - Stage A: ~30 min (1 epoch, embeddings only)
+  - Stage B: ~3-6 hours (3 epochs, full model)
+- **Inference**: ~200ms per SID generation with constraints
+
+### Key Implementation Details
+
+1. **Gradient checkpointing**: Required for 8B model on single GPU
+2. **BF16 training**: 2x faster than FP32, same quality
+3. **8-bit AdamW**: Reduces optimizer memory by 4x
+4. **Level-wise generation**: 4 sequential forward passes with masking
+5. **Trie lookup**: O(1) per level, negligible overhead
+
+### Known Limitations
+
+- **Single-path generation**: Greedy decode only (no beam search across levels)
+- **Context length**: Limited to last 8-16 items in history (~32-64 tokens)
+- **Cold start**: Requires at least 1 item in history
+- **Catalog coverage**: Only generates SIDs that exist in training catalog
+
+### Extensions (Future)
+
+1. **Natural language features**: Use item titles/categories in prompts
+2. **Multi-item generation**: Generate top-K diverse SIDs in one pass
+3. **LoRA adapters**: Train adapters instead of full model (faster, smaller)
+4. **Retrieval augmentation**: Combine with embedding-based retrieval
+5. **Online learning**: Incremental updates for new items/SIDs
