@@ -20,6 +20,12 @@ from .constraints import (
     get_sid_token_ids,
 )
 
+try:
+    from peft import PeftModel
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+
 
 SYSTEM_PROMPT = """You are a recommender that must reply ONLY with the next product's Semantic ID as 4 tokens in order: L1, L2, L3, L4.
 Valid token ranges by level:
@@ -38,25 +44,56 @@ class SIDRecommender:
         model_path: str,
         trie_path: str | None = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        base_model_path: str | None = None,
+        is_lora_adapter: bool = False,
     ):
         """Initialize recommender.
 
         Args:
-            model_path: Path to fine-tuned model
+            model_path: Path to fine-tuned model or LoRA adapter
             trie_path: Optional path to sid_trie.pkl for trie constraints
             device: Device to use
+            base_model_path: Path to base model (required if is_lora_adapter=True)
+            is_lora_adapter: Whether model_path points to a LoRA adapter
         """
         print(f"Loading model from {model_path}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            device_map="auto",
-        )
+
+        if is_lora_adapter:
+            if not PEFT_AVAILABLE:
+                raise ImportError("PEFT not available. Install with: pip install peft")
+            if not base_model_path:
+                raise ValueError("base_model_path required when is_lora_adapter=True")
+
+            # Load base model first
+            print(f"Loading base model from {base_model_path}...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                base_model_path,
+                trust_remote_code=True,
+            )
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_path,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                device_map="auto",
+            )
+
+            # Load LoRA adapter
+            print(f"Loading LoRA adapter from {model_path}...")
+            self.model = PeftModel.from_pretrained(base_model, model_path)
+            self.model = self.model.merge_and_unload()  # Merge for faster inference
+        else:
+            # Load full fine-tuned model
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                device_map="auto",
+            )
+
         self.model.eval()
         self.device = device
 

@@ -710,8 +710,9 @@ tiger_semantic_id_amazon_beauty/src/llm/
 ├── tokenizer_resize_qwen.py   # Add 1,027 SID tokens
 ├── constraints.py             # Level masks + trie constraints
 ├── finetune_qwen_vocab.py     # Stage A: embeddings only
-├── finetune_qwen_full.py      # Stage B: full model
-└── inference_qwen.py          # Constrained SID generation
+├── finetune_qwen_lora.py      # Stage B: LoRA adapters (RECOMMENDED)
+├── finetune_qwen_full.py      # Stage B: full model (requires A100 80GB)
+└── inference_qwen.py          # Constrained SID generation (supports both LoRA and full)
 ```
 
 ### Token Vocabulary
@@ -784,7 +785,26 @@ python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_vocab \
   --gradient_checkpointing
 ```
 
-**Stage B: Full Fine-tuning (3 epochs, all parameters)**
+**Stage B Option 1: LoRA Fine-tuning (RECOMMENDED - 3 epochs, LoRA adapters)**
+```bash
+python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_lora \
+  --data /content/artifacts/llm/dialogs_train.jsonl \
+  --valid /content/artifacts/llm/dialogs_valid.jsonl \
+  --in_model /content/artifacts/llm/qwen3_vocab_stage \
+  --out_model /content/artifacts/llm/qwen3_lora_adapter \
+  --sid_trie /content/artifacts/llm/sid_trie.pkl \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --per_device_train_batch_size 4 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 1e-4 \
+  --num_train_epochs 3 \
+  --bf16 \
+  --gradient_checkpointing
+```
+
+**Stage B Option 2: Full Fine-tuning (3 epochs, all parameters - requires A100 80GB)**
 ```bash
 python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_full \
   --data /content/artifacts/llm/dialogs_train.jsonl \
@@ -792,23 +812,27 @@ python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_full \
   --in_model /content/artifacts/llm/qwen3_vocab_stage \
   --out_model /content/artifacts/llm/qwen3_full_stage \
   --sid_trie /content/artifacts/llm/sid_trie.pkl \
-  --per_device_train_batch_size 2 \
-  --gradient_accumulation_steps 16 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 32 \
   --learning_rate 1e-5 \
   --num_train_epochs 3 \
   --bf16 \
-  --gradient_checkpointing
+  --gradient_checkpointing \
+  --use_8bit_adam
 ```
 
 ### Inference
 
+**With LoRA adapter (recommended):**
 ```python
 from tiger_semantic_id_amazon_beauty.src.llm.inference_qwen import SIDRecommender
 
-# Load model
+# Load LoRA adapter
 recommender = SIDRecommender(
-    model_path='/content/artifacts/llm/qwen3_full_stage',
+    model_path='/content/artifacts/llm/qwen3_lora_adapter',
+    base_model_path='/content/artifacts/llm/qwen3_vocab_stage',
     trie_path='/content/artifacts/llm/sid_trie.pkl',
+    is_lora_adapter=True,
 )
 
 # Generate from history
@@ -822,13 +846,28 @@ generated_sid = recommender.generate_sid(history_sids=history_sids)
 # Returns: (c1, c2, c3, c4) tuple with codes in [0, 255]
 ```
 
+**With full fine-tuned model:**
+```python
+from tiger_semantic_id_amazon_beauty.src.llm.inference_qwen import SIDRecommender
+
+# Load full model
+recommender = SIDRecommender(
+    model_path='/content/artifacts/llm/qwen3_full_stage',
+    trie_path='/content/artifacts/llm/sid_trie.pkl',
+)
+
+# Generate from history (same API as LoRA)
+generated_sid = recommender.generate_sid(history_sids=history_sids)
+```
+
 ### Artifacts
 
 **Outputs to `/content/artifacts/llm/`:**
 - `dialogs_train.jsonl`, `dialogs_valid.jsonl` - Training data
 - `sid_trie.pkl` - Valid continuation trie
 - `qwen3_vocab_stage/` - Stage A checkpoint (embeddings learned)
-- `qwen3_full_stage/` - Stage B checkpoint (final model)
+- `qwen3_lora_adapter/` - Stage B LoRA checkpoint (recommended)
+- `qwen3_full_stage/` - Stage B full fine-tuning checkpoint (optional, requires A100 80GB)
 
 ### Evaluation Metrics
 
@@ -854,12 +893,25 @@ generated_sid = recommender.generate_sid(history_sids=history_sids)
 
 ### Resource Requirements
 
-- **GPU**: A100 (40GB) or V100 (32GB) recommended
-- **Memory**: ~25GB for bf16, ~45GB for fp32
+**Full Fine-tuning (finetune_qwen_full.py):**
+- **GPU**: A100 80GB ONLY (requires ~54-60GB VRAM)
+- **Parameters trained**: 8B (100%)
+- **Memory breakdown**:
+  - Model weights (BF16): 16GB
+  - Gradients (BF16): 16GB
+  - Optimizer states (8-bit AdamW): ~16GB
+  - Activations + overhead: ~6-12GB
+- **Training time**: ~6-10 hours (3 epochs, batch_size=1)
+- **Inference**: ~200ms per SID generation
+
+**LoRA Fine-tuning (finetune_qwen_lora.py) - RECOMMENDED:**
+- **GPU**: V100 32GB, A100 40GB, or T4 (with smaller batch size)
+- **Parameters trained**: ~40-80M (0.5-1%)
+- **Memory**: ~20-25GB for bf16 (60% reduction vs full fine-tuning)
 - **Training time**:
   - Stage A: ~30 min (1 epoch, embeddings only)
-  - Stage B: ~3-6 hours (3 epochs, full model)
-- **Inference**: ~200ms per SID generation with constraints
+  - Stage B: ~2-4 hours (3 epochs, LoRA adapters)
+- **Inference**: ~200ms per SID generation (same as full fine-tuning)
 
 ### Key Implementation Details
 
@@ -876,10 +928,27 @@ generated_sid = recommender.generate_sid(history_sids=history_sids)
 - **Cold start**: Requires at least 1 item in history
 - **Catalog coverage**: Only generates SIDs that exist in training catalog
 
+### Recent Updates (2025-01-14)
+
+**LoRA Training Pipeline Added:**
+- Created `finetune_qwen_lora.py` for memory-efficient training
+- Updated `inference_qwen.py` to support loading LoRA adapters via PEFT
+- Updated notebook to use LoRA training by default
+- Memory usage: 60% reduction (~20-25GB vs ~54-60GB)
+- GPU compatibility: V100 32GB, A100 40GB, T4 (with reduced batch size)
+- Training time: ~2-4 hours vs ~6-10 hours for full fine-tuning
+- Quality: Expected to match full fine-tuning performance
+
+**Key Benefits:**
+- LoRA trains only 0.5-1% of parameters (LoRA adapters on attention/MLP layers)
+- Supports larger batch sizes (4 vs 1) for faster convergence
+- Can use higher learning rate (1e-4 vs 1e-5)
+- No 8-bit AdamW needed (memory is already low)
+
 ### Extensions (Future)
 
 1. **Natural language features**: Use item titles/categories in prompts
 2. **Multi-item generation**: Generate top-K diverse SIDs in one pass
-3. **LoRA adapters**: Train adapters instead of full model (faster, smaller)
-4. **Retrieval augmentation**: Combine with embedding-based retrieval
-5. **Online learning**: Incremental updates for new items/SIDs
+3. **Retrieval augmentation**: Combine with embedding-based retrieval
+4. **Online learning**: Incremental updates for new items/SIDs
+5. **LoRA hyperparameter tuning**: Experiment with different rank/alpha values
