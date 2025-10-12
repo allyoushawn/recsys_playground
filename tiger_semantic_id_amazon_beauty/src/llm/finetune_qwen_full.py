@@ -150,6 +150,11 @@ def main():
         action="store_true",
         help="Enable gradient checkpointing",
     )
+    parser.add_argument(
+        "--use_8bit_adam",
+        action="store_true",
+        help="Use 8-bit AdamW optimizer (reduces memory)",
+    )
 
     args = parser.parse_args()
 
@@ -231,6 +236,7 @@ def main():
         dataloader_num_workers=2,
         remove_unused_columns=False,
         report_to="none",
+        optim="adamw_bnb_8bit" if args.use_8bit_adam else "adamw_torch",
     )
 
     # Trainer
