@@ -45,7 +45,15 @@ def get_sid_token_ids(tokenizer, level: int | None = None) -> list[int]:
         token_strs = [f"<sid_{i}>" for i in level_range]
 
     token_ids = tokenizer.convert_tokens_to_ids(token_strs)
-    return token_ids
+
+    # Filter out None values (tokens not in vocabulary)
+    valid_token_ids = [tid for tid in token_ids if tid is not None]
+
+    if len(valid_token_ids) != len(token_ids):
+        missing_count = len(token_ids) - len(valid_token_ids)
+        print(f"Warning: {missing_count} SID tokens not found in tokenizer vocabulary")
+
+    return valid_token_ids
 
 
 def mask_logits_by_level(
@@ -152,7 +160,15 @@ class TrieConstraint:
         # L4: codes are in [0,255], map to <sid_768> to <sid_1023>
         level_offset = (level - 1) * 256
         token_strs = [f"<sid_{code + level_offset}>" for code in valid_codes]
-        valid_token_ids = tokenizer.convert_tokens_to_ids(token_strs)
+        raw_token_ids = tokenizer.convert_tokens_to_ids(token_strs)
+
+        # Filter out None values (tokens not in vocabulary)
+        valid_token_ids = [tid for tid in raw_token_ids if tid is not None]
+
+        if not valid_token_ids:
+            # All tokens missing - something is wrong with tokenizer
+            print(f"Error: No valid token IDs found for level {level}, prefix {prefix}")
+            return logits  # Return unmasked logits as fallback
 
         # Create mask
         mask = torch.full_like(logits, mask_value)

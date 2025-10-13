@@ -64,12 +64,23 @@ class SIDRecommender:
             if not base_model_path:
                 raise ValueError("base_model_path required when is_lora_adapter=True")
 
-            # Load base model first
+            # Try to load tokenizer from adapter first (it was saved there during training)
+            # If not found, fall back to base model
+            try:
+                print(f"Loading tokenizer from LoRA adapter: {model_path}...")
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                )
+            except Exception as e:
+                print(f"Tokenizer not found in adapter, loading from base model: {base_model_path}...")
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    base_model_path,
+                    trust_remote_code=True,
+                )
+
+            # Load base model
             print(f"Loading base model from {base_model_path}...")
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                base_model_path,
-                trust_remote_code=True,
-            )
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_path,
                 torch_dtype=torch.bfloat16,
@@ -96,6 +107,20 @@ class SIDRecommender:
 
         self.model.eval()
         self.device = device
+
+        # Verify SID tokens are in vocabulary
+        test_tokens = ["<sid_0>", "<sid_256>", "<sid_512>", "<sid_768>"]
+        test_ids = self.tokenizer.convert_tokens_to_ids(test_tokens)
+        missing_tokens = [tok for tok, tid in zip(test_tokens, test_ids) if tid is None]
+
+        if missing_tokens:
+            raise ValueError(
+                f"SID tokens not found in tokenizer vocabulary: {missing_tokens}\n"
+                f"Make sure you're loading from the Stage A checkpoint (qwen3_vocab_stage) "
+                f"which has the extended vocabulary with SID tokens."
+            )
+
+        print(f"✓ Verified SID tokens in vocabulary (vocab_size={len(self.tokenizer)})")
 
         # Load trie if provided
         self.trie = None
