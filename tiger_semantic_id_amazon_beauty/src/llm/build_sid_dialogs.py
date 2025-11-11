@@ -76,56 +76,84 @@ def format_history(history_sids: list[np.ndarray]) -> str:
     return "\n".join(lines)
 
 
+def format_history_compact(history_sids: list[np.ndarray]) -> str:
+    """Format history as comma-separated SIDs (compact format like reference)."""
+    sid_strs = [format_sid_tokens(sid) for sid in history_sids]
+    return "User's last purchases: " + ", ".join(sid_strs) + ". Next:"
+
+
 def create_dialogs(
     user_sequences: dict[int, list[int]],
     semantic_ids: np.ndarray,
     item_to_sid: dict[str, list[int]],
-    history_length: int = 8,
-    min_seq_len: int = 5,
+    history_lengths: list[int] = [2, 3, 5],
+    min_seq_len: int = 3,
 ) -> list[dict]:
-    """Create conversational dialogs from user sequences.
+    """Create conversational dialogs from user sequences with multiple variations.
+
+    Following reference implementation approach:
+    - Generates examples starting from position 2 (not 8)
+    - Creates multiple variations per split point (last_2, last_3, last_5)
+    - Uses compact format for consistency
 
     Args:
         user_sequences: Dict mapping user_id -> list of item_ids (chronological)
         semantic_ids: Array of shape [num_items, 4]
         item_to_sid: Dict mapping item_id (str) -> [c1, c2, c3, c4]
-        history_length: Number of items to include in history
-        min_seq_len: Minimum sequence length to create examples
+        history_lengths: List of history window sizes to generate (default: [2, 3, 5])
+        min_seq_len: Minimum sequence length to create examples (default: 3)
 
     Returns:
         List of dialog dicts with "messages" key
     """
     dialogs = []
+    stats = {f"last_{h}": 0 for h in history_lengths}
 
     for user_id, item_seq in tqdm(user_sequences.items(), desc="Building dialogs"):
         if len(item_seq) < min_seq_len:
             continue
 
-        # Create sliding windows over sequence
-        for end_idx in range(history_length, len(item_seq)):
-            start_idx = max(0, end_idx - history_length)
-            history_items = item_seq[start_idx:end_idx]
-            target_item = item_seq[end_idx]
+        # For each split point in the sequence (starting from position 2)
+        for split_point in range(2, len(item_seq)):
+            history = item_seq[:split_point]
+            target_item = item_seq[split_point]
 
-            # Get SIDs for history and target
+            # Get target SID
             try:
-                history_sids = [semantic_ids[item_id] for item_id in history_items]
                 target_sid = semantic_ids[target_item]
             except (IndexError, KeyError):
-                continue  # Skip if item not in semantic_ids
+                continue  # Skip if target not in semantic_ids
 
-            # Format as dialog
-            user_msg = format_history(history_sids)
-            assistant_msg = format_sid_tokens(target_sid)
+            # Create multiple variations with different history lengths
+            for hist_len in history_lengths:
+                # Take last N items from history
+                history_subset = history[-hist_len:] if len(history) >= hist_len else history
 
-            dialog = {
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": assistant_msg},
-                ]
-            }
-            dialogs.append(dialog)
+                # Get SIDs for history
+                try:
+                    history_sids = [semantic_ids[item_id] for item_id in history_subset]
+                except (IndexError, KeyError):
+                    continue  # Skip if any item not in semantic_ids
+
+                # Format as dialog with compact format
+                user_msg = format_history_compact(history_sids)
+                assistant_msg = format_sid_tokens(target_sid)
+
+                dialog = {
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                        {"role": "assistant", "content": assistant_msg},
+                    ],
+                    "type": f"seq_last_{hist_len}",  # Track variation type
+                }
+                dialogs.append(dialog)
+                stats[f"last_{hist_len}"] += 1
+
+    # Print statistics
+    print("\nDialog generation statistics:")
+    for hist_type, count in stats.items():
+        print(f"  {hist_type}: {count:,} examples")
 
     return dialogs
 
@@ -147,10 +175,10 @@ def main():
         help="Output directory for dialogs and trie",
     )
     parser.add_argument(
-        "--history_len",
-        type=int,
-        default=8,
-        help="Number of items in history",
+        "--history_lengths",
+        type=str,
+        default="2,3,5",
+        help="Comma-separated list of history lengths to generate (e.g., '2,3,5')",
     )
     parser.add_argument(
         "--train_ratio",
@@ -160,6 +188,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Parse history lengths
+    history_lengths = [int(x.strip()) for x in args.history_lengths.split(",")]
 
     # Create output directory
     out_dir = Path(args.out)
@@ -211,22 +242,24 @@ def main():
 
     print(f"Loaded sequences for {len(user_sequences)} users")
 
-    # Create dialogs
-    print("Creating dialogs...")
+    # Calculate expected examples
+    total_items = sum(len(seq) for seq in user_sequences.values())
+    avg_seq_len = total_items / len(user_sequences)
+    print(f"Average sequence length: {avg_seq_len:.2f}")
+
+    # Create dialogs with multiple variations
+    print(f"\nCreating dialogs with history lengths: {history_lengths}")
+    print("Following reference implementation approach:")
+    print("  - Starting from position 2 (not 8)")
+    print("  - Multiple variations per split point")
+    print("  - Compact format")
     dialogs = create_dialogs(
         user_sequences,
         semantic_ids,
         item_to_sid,
-        history_length=args.history_len,
+        history_lengths=history_lengths,
     )
-    print(f"Created {len(dialogs)} dialogs")
-
-    # Calculate average history length
-    avg_hist_len = np.mean([
-        len([msg for msg in d["messages"] if msg["role"] == "user"][0]["content"].split("\n")) - 2
-        for d in dialogs[:1000]  # Sample for speed
-    ])
-    print(f"Average history length: {avg_hist_len:.1f} items")
+    print(f"\nCreated {len(dialogs)} total dialogs")
 
     # Split train/valid
     np.random.seed(42)
