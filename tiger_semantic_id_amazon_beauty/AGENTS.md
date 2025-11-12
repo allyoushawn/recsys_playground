@@ -945,6 +945,426 @@ generated_sid = recommender.generate_sid(history_sids=history_sids)
 - Can use higher learning rate (1e-4 vs 1e-5)
 - No 8-bit AdamW needed (memory is already low)
 
+### LLM Training Failure Analysis and Resolution (2025-01-14)
+
+#### Initial Symptoms: Catastrophic Training Failure
+
+**Observed metrics on evaluation:**
+- **Invalid-ID@1**: 100% (all predictions generated invalid SID tokens)
+- **Unique SIDs generated**: 8 out of 1,000 test examples (severe mode collapse)
+- **SID@1 exact match**: 0.00% (zero correct predictions)
+- **Diversity collapse**: Model predicting only 8 distinct outputs despite 12,101 possible items
+
+#### Root Causes Identified (7 Critical Issues)
+
+**1. Loss Masking Problem - Training on Wrong Tokens**
+
+**Issue location:** `finetune_qwen_lora.py:64-71`
+```python
+# PROBLEMATIC CODE:
+labels = encoded["input_ids"].copy()
+labels = [-100 if token_id == tokenizer.pad_token_id else token_id
+          for token_id in labels]
+```
+
+**Problem:**
+- Training loss computed on ENTIRE conversation (system prompt + user message + assistant response)
+- Only ~5% of tokens are actual SID predictions (4 tokens out of ~80 total)
+- 95% of loss comes from boilerplate text that should be ignored
+- Model optimizes for repeating system instructions rather than learning SID patterns
+
+**Correct approach:**
+```python
+# SHOULD MASK everything except assistant response:
+# system: -100 (masked)
+# user: -100 (masked)
+# assistant: actual token IDs (trained)
+```
+
+**Impact:** Severe - model learns wrong task (text generation instead of SID prediction)
+
+---
+
+**2. No Constraints During Training - Train-Test Mismatch**
+
+**Issue:** Training uses unconstrained generation, inference uses hard constraints
+
+**Training behavior:**
+- Model free to predict ANY token from 151K vocabulary
+- No enforcement of level ranges (L1=[0-255], L2=[256-511], etc.)
+- Model can output invalid sequences like `<sid_0> <sid_0> <sid_0> <sid_0>` (all L1 tokens)
+
+**Inference behavior:** (`inference_qwen.py:189-233`)
+- Level masks force valid ranges per position
+- Trie constraints enforce valid continuations
+- Model CANNOT generate invalid SIDs
+
+**Result:** Massive distribution mismatch
+- Training: "anything goes"
+- Inference: "strict constraints"
+- Model never learned what "valid" means, constraints applied as post-hoc fix
+
+**Solution needed:** Apply constraints during training (rejection sampling or masking invalid tokens in training loop)
+
+---
+
+**3. Insufficient Embedding Learning - Stage A Underfitting**
+
+**Issue location:** `finetune_qwen_vocab.py:143`
+```python
+num_train_epochs=1,  # Only 1 epoch for 1,024 new tokens!
+learning_rate=5e-4,  # Also quite high
+```
+
+**Problem:**
+- Adding 1,024 new SID tokens (<sid_0> through <sid_1023>)
+- Each token needs to learn meaningful embedding in 768-dim space
+- Only 1 epoch with 416K examples = ~400 updates per token on average
+- High LR (5e-4) may cause instability
+
+**Reference comparison:**
+- Standard practice: 3-5 epochs for vocabulary extension
+- Embedding typically needs more training than other parameters
+
+**Impact:** Model starts Stage B with poorly-initialized SID embeddings, making it harder to learn SID patterns
+
+---
+
+**4. Autoregressive Mismatch - Teacher Forcing vs Sequential Generation**
+
+**Training:** Teacher forcing with full context
+```
+Input:  [system][user][assistant: <sid_64> <sid_325> <sid_630>]
+Target: [ignore][ignore][         <sid_64> <sid_325> <sid_630> <sid_768>]
+```
+Model sees ground truth SID tokens during training (even if previous predictions were wrong)
+
+**Inference:** Sequential generation (`inference_qwen.py:194-233`)
+```python
+for level in range(1, 5):  # Generate L1, then L2, then L3, then L4
+    # Use previously generated tokens as context
+    # If L1 wrong → L2 sees wrong input → cascading errors
+```
+
+**Problem:** Training never experiences cascading errors from wrong predictions, but inference does
+
+**Solution needed:** Scheduled sampling (mix teacher forcing with model's own predictions during training)
+
+---
+
+**5. Aggressive LoRA Configuration - Insufficient Capacity**
+
+**Issue location:** `finetune_qwen_lora.py:110-119`
+```python
+lora_r=16,        # Rank 16 for 8B parameter model
+lora_alpha=32,    # Alpha = 2 × rank
+lora_dropout=0.05,
+```
+
+**Problem:**
+- Qwen3-8B has ~8 billion parameters
+- LoRA with r=16 trains only ~40-80M parameters (0.5-1%)
+- Task requires learning complex patterns:
+  - Semantic relationships between SID levels
+  - Sequential dependencies in user behavior
+  - Mapping from history context to next SID
+
+**Typical LoRA recommendations:**
+- r=32-64 for instruction tuning on 7-8B models
+- r=16 suitable for simpler tasks (classification, simple QA)
+- Complex reasoning tasks need higher rank
+
+**Impact:** Model capacity bottleneck prevents learning nuanced patterns
+
+---
+
+**6. High Learning Rate - Stage B Instability**
+
+**Issue location:** `finetune_qwen_lora.py:142`
+```python
+learning_rate=1e-4,  # 5x higher than reference
+```
+
+**Reference implementation uses:** 2e-5 (from Eugene Yan's semantic-ids-llm)
+
+**Problem:**
+- LoRA fine-tuning typically needs lower LR than full fine-tuning
+- High LR can cause:
+  - Loss spikes and instability
+  - Catastrophic forgetting (model forgets language capabilities)
+  - Overshooting optimal parameters
+  - Mode collapse (converges to predicting few outputs)
+
+**Evidence:** Mode collapse to 8 unique predictions suggests overshooting
+
+---
+
+**7. No Prompt Diversity - Single Template Overfitting**
+
+**Issue:** All training examples use identical format (`build_sid_dialogs.py:79-82`)
+```python
+def format_history_compact(history_sids):
+    sid_strs = [format_sid_tokens(sid) for sid in history_sids]
+    return "User's last purchases: " + ", ".join(sid_strs) + ". Next:"
+```
+
+**Problem:**
+- Every example starts with "User's last purchases:"
+- Model may learn to pattern-match on fixed text rather than SID content
+- No robustness to prompt variations
+
+**Reference implementation:** Uses multiple task types (A-F) with different prompt templates
+
+**Impact:** Model overfits to specific phrasing, may fail on alternative prompts
+
+---
+
+#### Data Generation Analysis: Reference vs Current Implementation
+
+**Dataset Comparison:**
+
+| Aspect | Reference (Eugene Yan) | Current (Amazon Beauty) |
+|--------|----------------------|-------------------------|
+| Dataset | Amazon Reviews 2023 - Video Games | Amazon Reviews - Beauty |
+| Users | 79,000 | 22,363 |
+| Products | 66,000 | 12,101 |
+| Avg sequence length | ~6.5 items | ~8.2 items |
+| Total interactions | ~514K | ~183K |
+
+**Key insight:** Different dataset categories (Video Games vs Beauty), not same dataset. Beauty is smaller/niche but has longer sequences.
+
+---
+
+#### Training Data Types Breakdown
+
+Reference implementation uses **6 task types** to generate 4.2M examples:
+
+**Type A: SID → Title (Per-Item Task)**
+- Format: Given SID, generate product title
+- Example count: ~319,000 (7.6%)
+- Purpose: Teach model semantic meaning of each SID
+- Example:
+  ```
+  User: What product has SID <sid_64> <sid_325> <sid_630> <sid_768>?
+  Assistant: Maybelline SuperStay Matte Ink Liquid Lipstick
+  ```
+
+**Type B: Title → SID (Per-Item Task)**
+- Format: Given product title, generate its SID
+- Example count: ~479,000 (11.4%)
+- Purpose: Reverse mapping, reinforces SID-product association
+- Example:
+  ```
+  User: What is the SID for "Neutrogena Hydro Boost Water Gel"?
+  Assistant: <sid_91> <sid_402> <sid_653> <sid_768>
+  ```
+
+**Type C: Next-Item Prediction (Sequential Task)** ✅ **IMPLEMENTED**
+- Format: Given SID history, predict next SID
+- Example count: ~801,000 (19.1%) in reference, **416,000 achieved**
+- Purpose: Core recommendation task
+- Example:
+  ```
+  User: User's last purchases: <sid_64> <sid_313> <sid_637> <sid_768>,
+        <sid_112> <sid_201> <sid_523> <sid_804>. Next:
+  Assistant: <sid_64> <sid_325> <sid_630> <sid_768>
+  ```
+
+**Type D: Semantic Understanding (Analytical Task)**
+- Format: Questions about SID relationships, categories
+- Example count: ~63,000 (1.5%)
+- Purpose: Teach hierarchical structure of SIDs
+- Example:
+  ```
+  User: Do these products share the same category?
+        <sid_64> <sid_313> <sid_637> <sid_768>
+        <sid_64> <sid_325> <sid_630> <sid_768>
+  Assistant: Yes, they share L1 (makeup) and L2 (lips).
+  ```
+
+**Type E: Co-Purchase Patterns (Graph Task)** 🔥 **LARGEST TYPE**
+- Format: "Users who bought X also bought Y" patterns
+- Example count: ~2,570,000 (61.2%) ← **Dominates the dataset!**
+- Purpose: Capture product affinity beyond sequential patterns
+- Example:
+  ```
+  User: Users who bought <sid_64> <sid_313> <sid_637> <sid_768>
+        also frequently bought:
+  Assistant: <sid_91> <sid_402> <sid_653> <sid_768>
+  ```
+
+**Type F: Additional Patterns (Misc)**
+- Format: Various other recommendation patterns
+- Example count: ~540 (0.01%)
+- Purpose: Edge cases and diversity
+
+**Total:** 4,198,540 examples
+
+---
+
+#### Achievement: Type C Data Boost (Next-Item Prediction)
+
+**Original implementation:**
+```python
+def create_dialogs(user_sequences, history_length=8, min_seq_len=5):
+    for split_point in range(8, len(item_seq)):  # Start at position 8
+        history = item_seq[:split_point]
+        target = item_seq[split_point]
+        # Generate 1 example with last 8 items
+```
+
+**Problems:**
+- Started at position 8 → sequences <9 items generated 0 examples
+- Only 1 variation per position (fixed history_length=8)
+- With avg sequence length 8.2, most users contributed few examples
+
+**Results:**
+- 22,363 sequences → **37,052 examples** (1.66 examples/sequence)
+
+---
+
+**Updated implementation:** (`build_sid_dialogs.py:85-158`)
+
+**Key changes:**
+1. **Start at position 2** (not 8) - maximizes data from short sequences
+2. **Multiple variations** - 3 examples per position (last_2, last_3, last_5)
+3. **Compact format** - matches reference implementation style
+
+```python
+def create_dialogs(user_sequences, history_lengths=[2, 3, 5], min_seq_len=3):
+    for split_point in range(2, len(item_seq)):  # Start at 2 not 8!
+        for hist_len in history_lengths:  # 3 variations per position
+            history_subset = history[-hist_len:]
+            # Generate example with last N items
+```
+
+**Results:**
+- 22,363 sequences → **415,866 examples** (18.6 examples/sequence)
+- **11.2x increase** from original implementation
+- **52% of reference Type C** (416K vs 801K) despite having 28% of sequences
+
+**Statistics by variation:**
+- last_2: ~138,622 examples (33%)
+- last_3: ~138,622 examples (33%)
+- last_5: ~138,622 examples (33%)
+
+**Why this works:**
+- Position 2 allows sequences as short as 3 items to contribute
+- Multiple history lengths teach model to work with varying context
+- More examples per user → better personalization learning
+
+---
+
+#### Plans to Scale Training Data
+
+**Current status:**
+- Type C: 416K examples ✅
+- Types A, B, D, E, F: 0 examples ❌
+
+**Immediate next steps:**
+
+**1. Implement Type A (SID → Title) - Est. ~73K examples**
+- Requires: `meta_Beauty.json.gz` with product titles
+- Generation: Per-item task, 1 example per item with metadata
+- Code needed: Template in `build_sid_dialogs.py`
+  ```python
+  def create_sid_to_title_dialogs(semantic_ids, metadata):
+      for item_id, sid in enumerate(semantic_ids):
+          dialog = {
+              "messages": [
+                  {"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": f"What product has SID {format_sid(sid)}?"},
+                  {"role": "assistant", "content": metadata[item_id]['title']},
+              ],
+              "type": "sid_to_title",
+          }
+  ```
+
+**2. Implement Type B (Title → SID) - Est. ~109K examples**
+- Similar to Type A but reversed
+- Can augment with paraphrased titles (1.5x multiplier)
+
+**3. Implement Type E (Co-Purchase) - Est. ~257K examples** 🎯 **HIGH IMPACT**
+- Requires: Co-occurrence matrix from user sequences
+- Algorithm: For each item, find top-K frequently co-purchased items
+- Generation: Multiple examples per item (top-10 co-purchases)
+  ```python
+  def create_copurchase_dialogs(cooccurrence_matrix, semantic_ids, top_k=10):
+      for item_id, sid in enumerate(semantic_ids):
+          copurchased_items = cooccurrence_matrix[item_id].topk(top_k)
+          for copurchased in copurchased_items:
+              # Generate dialog...
+  ```
+
+**4. Implement Type D (Semantic Understanding) - Est. ~15K examples**
+- Requires: Category labels from `c1` clustering analysis
+- Generate questions about SID relationships
+
+**5. Skip Type F** (miscellaneous patterns - minimal contribution)
+
+---
+
+**Projected totals with all types:**
+
+| Type | Current | Projected | % of Reference |
+|------|---------|-----------|----------------|
+| A: SID → Title | 0 | 73K | 23% |
+| B: Title → SID | 0 | 109K | 23% |
+| C: Next-item | 416K | 416K | 52% |
+| D: Semantic | 0 | 15K | 24% |
+| E: Co-purchase | 0 | 257K | 10% |
+| F: Misc | 0 | 0 | 0% |
+| **Total** | **416K** | **870K** | **21%** |
+
+**Why 21% of reference despite 28% of sequences:**
+- Smaller catalog (12K vs 66K items) → fewer per-item tasks
+- Co-purchase type (Type E) scales with catalog size × top-K
+- Video Games has denser co-purchase graph than Beauty
+
+---
+
+#### Recommended Training Improvements Priority
+
+**🔥 CRITICAL (Fix immediately for next training run):**
+1. **Fix loss masking** - Only train on assistant response tokens
+2. **Reduce Stage B learning rate** - 1e-4 → 2e-5
+3. **Increase Stage A epochs** - 1 → 3-5 epochs
+
+**⚠️ HIGH PRIORITY (Fix before production):**
+4. **Add training constraints** - Mask invalid tokens during training
+5. **Increase LoRA rank** - r=16 → r=32 or r=64
+6. **Reduce Stage B beta** - 0.25 → 0.01 (prevent commitment loss collapse)
+
+**📊 MEDIUM PRIORITY (Improves performance):**
+7. **Implement scheduled sampling** - Mix teacher forcing with model predictions
+8. **Add prompt diversity** - Multiple templates for Type C
+9. **Increase Stage A learning rate** - 5e-4 → 1e-3 (embeddings need strong signal)
+
+**🚀 LONG-TERM (Scaling):**
+10. **Implement Types A, B, D, E** - Scale to 870K examples
+11. **Add data augmentation** - Paraphrasing, history shuffling
+12. **Multi-task training** - Mix all 6 types in each batch
+
+---
+
+#### Expected Impact of Fixes
+
+**After CRITICAL fixes:**
+- Invalid-ID@1: 100% → <5% (constraints + proper training)
+- Unique SIDs: 8 → 1000+ (loss masking + lower LR prevents mode collapse)
+- SID@1: 0.0% → 5-10% (model can learn basic patterns)
+
+**After HIGH PRIORITY fixes:**
+- SID@10: 10-15% (better capacity and constraints)
+- Item Recall@10: 20-30% (competitive with Seq2Seq baseline)
+
+**After implementing all data types:**
+- SID@10: 20-30% (multi-task learning improves robustness)
+- Item Recall@10: 35-45% (richer training signal from 6 task types)
+- Qualitative: Model can answer "SID→Title" and "Title→SID" queries
+
+---
+
 ### Extensions (Future)
 
 1. **Natural language features**: Use item titles/categories in prompts
