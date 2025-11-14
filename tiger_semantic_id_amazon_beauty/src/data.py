@@ -13,26 +13,82 @@ import pandas as pd
 from .utils import ensure_dirs
 
 
-SNAP_REVIEWS = (
-    "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Beauty_5.json.gz"
-)
-SNAP_META = (
-    "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Beauty.json.gz"
-)
+# Dataset URLs for Amazon 5-core datasets
+DATASET_URLS = {
+    "Beauty": {
+        "reviews": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Beauty_5.json.gz",
+        "meta": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Beauty.json.gz",
+    },
+    "Video_Games": {
+        "reviews": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Video_Games_5.json.gz",
+        "meta": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Video_Games.json.gz",
+    },
+}
+
+# Legacy constants for backward compatibility
+SNAP_REVIEWS = DATASET_URLS["Beauty"]["reviews"]
+SNAP_META = DATASET_URLS["Beauty"]["meta"]
 
 
 @dataclass
-class BeautyConfig:
+class DatasetConfig:
+    """Configuration for dataset loading and preprocessing."""
+    dataset_name: str = "Beauty"  # Options: "Beauty", "Video_Games"
     min_user_interactions: int = 5
     max_hist_len: int = 20
 
+    def get_urls(self) -> Tuple[str, str]:
+        """Get the review and metadata URLs for the configured dataset."""
+        if self.dataset_name not in DATASET_URLS:
+            raise ValueError(
+                f"Unknown dataset: {self.dataset_name}. "
+                f"Available options: {list(DATASET_URLS.keys())}"
+            )
+        urls = DATASET_URLS[self.dataset_name]
+        return urls["reviews"], urls["meta"]
 
+    def get_filenames(self) -> Tuple[str, str]:
+        """Get expected local filenames for reviews and metadata."""
+        if self.dataset_name == "Beauty":
+            return "reviews_Beauty_5.json.gz", "meta_Beauty.json.gz"
+        elif self.dataset_name == "Video_Games":
+            return "reviews_Video_Games_5.json.gz", "meta_Video_Games.json.gz"
+        else:
+            # Generic fallback
+            return (
+                f"reviews_{self.dataset_name}_5.json.gz",
+                f"meta_{self.dataset_name}.json.gz",
+            )
+
+
+# Legacy alias for backward compatibility
+BeautyConfig = DatasetConfig
+
+
+def download_dataset(data_dir: str, dataset_name: str = "Beauty") -> Tuple[str, str]:
+    """Return expected filepaths for the specified dataset.
+
+    Actual download is done in the notebook via wget.
+
+    Args:
+        data_dir: Directory to store data files
+        dataset_name: Name of the dataset (e.g., "Beauty", "Video_Games")
+
+    Returns:
+        Tuple of (reviews_path, meta_path)
+    """
+    ensure_dirs(data_dir)
+    cfg = DatasetConfig(dataset_name=dataset_name)
+    reviews_file, meta_file = cfg.get_filenames()
+    reviews_gz = os.path.join(data_dir, reviews_file)
+    meta_gz = os.path.join(data_dir, meta_file)
+    return reviews_gz, meta_gz
+
+
+# Legacy function for backward compatibility
 def download_beauty(data_dir: str) -> Tuple[str, str]:
     """Return expected filepaths; actual download is done in the notebook via wget."""
-    ensure_dirs(data_dir)
-    reviews_gz = os.path.join(data_dir, "reviews_Beauty_5.json.gz")
-    meta_gz = os.path.join(data_dir, "meta_Beauty.json.gz")
-    return reviews_gz, meta_gz
+    return download_dataset(data_dir, dataset_name="Beauty")
 
 
 def _parse_json_lines(path: str) -> List[dict]:
@@ -114,7 +170,7 @@ def load_meta_df(meta_path: str) -> pd.DataFrame:
 
 
 def filter_and_split(
-    reviews: pd.DataFrame, cfg: BeautyConfig
+    reviews: pd.DataFrame, cfg: DatasetConfig
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Filter users with >= min interactions; split by leave-one-out per user.
 
