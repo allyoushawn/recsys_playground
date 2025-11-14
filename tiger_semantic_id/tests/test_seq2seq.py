@@ -1,6 +1,6 @@
 import torch
 
-from tiger_semantic_id_amazon_beauty.src.seq2seq import (
+from tiger_semantic_id.src.seq2seq import (
     TIGERSeqDataset,
     VocabConfig,
     Seq2SeqConfig,

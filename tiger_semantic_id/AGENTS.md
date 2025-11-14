@@ -4,17 +4,17 @@
 - Implement the Semantic ID pipeline via RQ‑VAE and a compact seq2seq transformer for generative retrieval on the Amazon Beauty 5‑core dataset; produce metrics and visualizations validating paper claims.
 
 ## Structure (planned)
-- `tiger_semantic_id_amazon_beauty/`
+- `tiger_semantic_id/`
   - `src/` — pipeline modules (data, rqvae, seq2seq, eval, utils)
   - `tests/` — unit tests (data mapping, RQ‑VAE shapes/usage)
   - `README.md` — overview + Colab usage
   - `requirements.txt` — pinned deps
-- `notebooks/tiger_semantic_id_amazon_beauty/`
+- `notebooks/tiger_semantic_id/`
   - `TIGER_SemanticID_AmazonBeauty.ipynb` — end‑to‑end Colab notebook
 
 ## Path & Colab Setup
-- Notebook installs deps with: `!pip -q install -r tiger_semantic_id_amazon_beauty/requirements.txt`
-- Add `tiger_semantic_id_amazon_beauty/src` to `sys.path` in the notebook for imports.
+- Notebook installs deps with: `!pip -q install -r tiger_semantic_id/requirements.txt`
+- Add `tiger_semantic_id/src` to `sys.path` in the notebook for imports.
 - Use `/content/data` for downloads and `/content/artifacts` for saved models/outputs in Colab.
 
 ## Dev Setup (venv — do this first)
@@ -23,7 +23,7 @@
   - Alternatives: `source .venv/bin/activate` or `source vevn/bin/activate` (if named differently)
   - Verify: `python -V && which python`
   - Deactivate: `deactivate`
-- Install project dependencies from repo root: `python -m pip install -r tiger_semantic_id_amazon_beauty/requirements.txt`
+- Install project dependencies from repo root: `python -m pip install -r tiger_semantic_id/requirements.txt`
 - Agents: assume the venv is active for all shell commands and Python runs.
 
 ## Dependencies (pin standard versions)
@@ -168,7 +168,7 @@ def _parse_python_dict_lines(path: str):
                 continue
     return rows
 
-from tiger_semantic_id_amazon_beauty.src import data
+from tiger_semantic_id.src import data
 data._parse_json_lines = _parse_python_dict_lines
 ```
 - Critical timing: patch `_parse_json_lines` before importing any data-loading functions.
@@ -260,7 +260,7 @@ print(f"Unique code combinations: {unique_codes}")
 - Metrics achieved: Recall/NDCG tables for RQ-VAE vs Random vs LSH; cold-start probe shows non-zero recall for unseen items.
 
 ## Files Modified
-- `tiger_semantic_id_amazon_beauty/src/rqvae.py`:
+- `tiger_semantic_id/src/rqvae.py`:
   - Improved architecture (shallower encoder/decoder with dropout)
   - **REMOVED per-level residual normalization** (caused numerical explosion with 400k+ distances)
   - Residual k-means init on encoded samples
@@ -268,8 +268,8 @@ print(f"Unique code combinations: {unique_codes}")
   - Code usage + perplexity tracking
   - Per-level loss computation (`forward_with_losses()`)
   - Dead code revival mechanism
-- `tiger_semantic_id_amazon_beauty/src/embeddings.py`: GPU acceleration with auto device selection, smart batch sizing, device-aware tensors, extended logging.
-- `notebooks/tiger_semantic_id_amazon_beauty/TIGER_SemanticID_AmazonBeauty.ipynb`:
+- `tiger_semantic_id/src/embeddings.py`: GPU acceleration with auto device selection, smart batch sizing, device-aware tensors, extended logging.
+- `notebooks/tiger_semantic_id/TIGER_SemanticID_AmazonBeauty.ipynb`:
   - Parsing patch for Python dict format
   - GPU embedding integration
   - Diversity monitors (encoder, per-level usage, collision profile, neighbor preservation)
@@ -277,7 +277,7 @@ print(f"Unique code combinations: {unique_codes}")
   - Quantization mechanism verification diagnostics
   - Acceptance criteria checks
   - Notebook cleanup, centralized device management
-- `notebooks/tiger_semantic_id_amazon_beauty/data_eda.ipynb`: diagnostic tooling for data sanity checks.
+- `notebooks/tiger_semantic_id/data_eda.ipynb`: diagnostic tooling for data sanity checks.
 - Documentation: this `AGENTS.md` consolidates fixes + production runbook.
 
 ## Key Learnings
@@ -704,7 +704,7 @@ Fine-tune Qwen3-8B to generate Semantic IDs for next-item recommendation using a
 ### Package Structure
 
 ```
-tiger_semantic_id_amazon_beauty/src/llm/
+tiger_semantic_id/src/llm/
 ├── __init__.py
 ├── build_sid_dialogs.py       # Data → JSONL dialogs + trie
 ├── tokenizer_resize_qwen.py   # Add 1,027 SID tokens
@@ -772,7 +772,7 @@ This guarantees **Invalid-ID@K = 0%** (all generated SIDs exist in catalog).
 
 **Stage A: Vocabulary Extension (1 epoch, embeddings only)**
 ```bash
-python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_vocab \
+python -m tiger_semantic_id.src.llm.finetune_qwen_vocab \
   --data /content/artifacts/llm/dialogs_train.jsonl \
   --valid /content/artifacts/llm/dialogs_valid.jsonl \
   --in_model /content/artifacts/llm/qwen3_vocab_stage \
@@ -787,7 +787,7 @@ python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_vocab \
 
 **Stage B Option 1: LoRA Fine-tuning (RECOMMENDED - 3 epochs, LoRA adapters)**
 ```bash
-python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_lora \
+python -m tiger_semantic_id.src.llm.finetune_qwen_lora \
   --data /content/artifacts/llm/dialogs_train.jsonl \
   --valid /content/artifacts/llm/dialogs_valid.jsonl \
   --in_model /content/artifacts/llm/qwen3_vocab_stage \
@@ -806,7 +806,7 @@ python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_lora \
 
 **Stage B Option 2: Full Fine-tuning (3 epochs, all parameters - requires A100 80GB)**
 ```bash
-python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_full \
+python -m tiger_semantic_id.src.llm.finetune_qwen_full \
   --data /content/artifacts/llm/dialogs_train.jsonl \
   --valid /content/artifacts/llm/dialogs_valid.jsonl \
   --in_model /content/artifacts/llm/qwen3_vocab_stage \
@@ -825,7 +825,7 @@ python -m tiger_semantic_id_amazon_beauty.src.llm.finetune_qwen_full \
 
 **With LoRA adapter (recommended):**
 ```python
-from tiger_semantic_id_amazon_beauty.src.llm.inference_qwen import SIDRecommender
+from tiger_semantic_id.src.llm.inference_qwen import SIDRecommender
 
 # Load LoRA adapter
 recommender = SIDRecommender(
@@ -848,7 +848,7 @@ generated_sid = recommender.generate_sid(history_sids=history_sids)
 
 **With full fine-tuned model:**
 ```python
-from tiger_semantic_id_amazon_beauty.src.llm.inference_qwen import SIDRecommender
+from tiger_semantic_id.src.llm.inference_qwen import SIDRecommender
 
 # Load full model
 recommender = SIDRecommender(

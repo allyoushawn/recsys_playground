@@ -15,10 +15,10 @@ A multi-project workspace for recommender systems research prototypes. Each proj
   - Notebook: `notebooks/ple_experiment/run_experiment.ipynb`
   - Extra scripts under `ple_experiment/` (data prep and training).
 
-- TIGER SemanticID on Amazon Beauty (`tiger_semantic_id_amazon_beauty/`)
-  - Planned: Semantic ID pipeline with RQ‑VAE + seq2seq generative retrieval on Amazon Beauty 5‑core.
-  - Plan: `tiger_semantic_id_amazon_beauty/AGENTS.md`
-  - Notebook (to be added): `notebooks/tiger_semantic_id_amazon_beauty/TIGER_SemanticID_AmazonBeauty.ipynb`
+- TIGER SemanticID (`tiger_semantic_id/`)
+  - Semantic ID pipeline with RQ‑VAE + seq2seq generative retrieval on Amazon 5‑core datasets (Beauty, Video_Games).
+  - Plan: `tiger_semantic_id/AGENTS.md`
+  - Notebook: `notebooks/tiger_semantic_id/TIGER_SemanticID.ipynb`
 
 ## Quickstart
 
@@ -59,12 +59,12 @@ python -m pip install -r ple_experiment/requirements.txt  # if present
 notebooks/
   movie_lens_100k/movielens_baseline.ipynb
   ple_experiment/run_experiment.ipynb
-  tiger_semantic_id_amazon_beauty/  # (planned notebooks)
+  tiger_semantic_id/  # (planned notebooks)
 movie_lens_100k/
   src/  tests/  requirements.txt  README.md  AGENTS.md
 ple_experiment/
   *.py  README.md  AGENTS.md  requirements.txt (if present)
-tiger_semantic_id_amazon_beauty/
+tiger_semantic_id/
   AGENTS.md  # src/tests/README/requirements to be added
 ```
 

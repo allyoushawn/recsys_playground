@@ -2,7 +2,7 @@ import types
 import torch
 import pandas as pd
 
-import tiger_semantic_id_amazon_beauty.src.embeddings as emb_mod
+import tiger_semantic_id.src.embeddings as emb_mod
 
 
 def test_build_item_text_basic():

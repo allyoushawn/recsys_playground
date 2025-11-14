@@ -1,4 +1,4 @@
-from tiger_semantic_id_amazon_beauty.src.utils import set_seed
+from tiger_semantic_id.src.utils import set_seed
 import numpy as np
 import random
 

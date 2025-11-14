@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from tiger_semantic_id_amazon_beauty.src.visualize import (
+from tiger_semantic_id.src.visualize import (
     plot_c1_category_distribution,
     plot_hierarchy_c1_c2,
 )

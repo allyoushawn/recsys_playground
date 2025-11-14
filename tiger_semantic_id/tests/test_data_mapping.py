@@ -1,6 +1,6 @@
 import pandas as pd
 
-from tiger_semantic_id_amazon_beauty.src.data import build_id_maps, apply_id_maps
+from tiger_semantic_id.src.data import build_id_maps, apply_id_maps
 
 
 def test_build_and_apply_id_maps():

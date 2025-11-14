@@ -2,7 +2,7 @@ import json
 
 import pandas as pd
 
-from tiger_semantic_id_amazon_beauty.src.data import load_meta_df
+from tiger_semantic_id.src.data import load_meta_df
 
 
 def test_load_meta_df_item_id_from_asin(tmp_path):

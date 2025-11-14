@@ -1,6 +1,6 @@
 import pandas as pd
 
-from tiger_semantic_id_amazon_beauty.src.data import filter_and_split, BeautyConfig
+from tiger_semantic_id.src.data import filter_and_split, BeautyConfig
 
 
 def test_filter_and_split_leave_one_out():

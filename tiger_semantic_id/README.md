@@ -2,8 +2,8 @@
 
 This module implements a Colab-friendly pipeline for TIGER (Semantic IDs via RQ‑VAE + generative retrieval) on Amazon 5‑core datasets.
 
-- Notebook: `notebooks/tiger_semantic_id_amazon_beauty/TIGER_SemanticID_AmazonBeauty.ipynb`
-- Source: `tiger_semantic_id_amazon_beauty/src`
+- Notebook: `notebooks/tiger_semantic_id/TIGER_SemanticID.ipynb`
+- Source: `tiger_semantic_id/src`
 - Artifacts: saved to `/content/artifacts` in Colab
 
 ## Supported Datasets
@@ -28,7 +28,7 @@ class Config:
 
 ## Local Dev
 - Activate the repo venv first: `source venv/bin/activate` (or `.venv`).
-- Install deps: `python -m pip install -r tiger_semantic_id_amazon_beauty/requirements.txt`.
+- Install deps: `python -m pip install -r tiger_semantic_id/requirements.txt`.
 - Minimal tests (optional): `pytest -q` from repo root or this folder after setting `PYTHONPATH`.
 
 ## Adding New Datasets
@@ -49,4 +49,4 @@ DATASET_URLS = {
 
 2. Add filename mapping in `DatasetConfig.get_filenames()` method (optional, generic fallback exists).
 
-See `tiger_semantic_id_amazon_beauty/AGENTS.md` for the full plan and acceptance criteria.
+See `tiger_semantic_id/AGENTS.md` for the full plan and acceptance criteria.

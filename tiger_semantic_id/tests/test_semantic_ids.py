@@ -2,7 +2,7 @@ import json
 import numpy as np
 import torch
 
-from tiger_semantic_id_amazon_beauty.src.semantic_id import assign_semantic_ids
+from tiger_semantic_id.src.semantic_id import assign_semantic_ids
 
 
 def test_assign_semantic_ids_collision(tmp_path):

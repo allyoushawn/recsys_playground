@@ -1,6 +1,6 @@
 import torch
 
-from tiger_semantic_id_amazon_beauty.src.rqvae import RQVAE, RQVAEConfig, encode_codes
+from tiger_semantic_id.src.rqvae import RQVAE, RQVAEConfig, encode_codes
 
 
 def test_rqvae_forward_shapes():
