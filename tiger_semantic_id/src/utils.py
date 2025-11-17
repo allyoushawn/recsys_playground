@@ -54,6 +54,6 @@ def try_orjson_loads(s: str) -> Any:
 
 @dataclass
 class Paths:
-    data_dir: str = "/content/data"
-    artifacts_dir: str = "/content/artifacts"
+    data_dir: str = "data"
+    artifacts_dir: str = "artifacts"
 
