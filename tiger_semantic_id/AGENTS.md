@@ -332,7 +332,139 @@ print(f"Unique code combinations: {unique_codes}")
 
 ## Recent Updates
 
-### Missing Straight-Through Estimator Discovery (2025-10-05) 🔥 CRITICAL - LATEST
+### Text Format Backward Compatibility Fix (2025-11-16) 🔥 CRITICAL - LATEST
+
+**Problem:** After implementing validation mode and TPU support, RQ-VAE training on Beauty dataset showed **0.0% diversity** (all items → same code). Previously (commit `5e45780`), the same dataset achieved >50% diversity.
+
+**Investigation Process:**
+1. Created checkpoint branch `20251116_saved_tiger_checkpoint` to save current state
+2. Rolled back to known good commit `5e45780`
+3. Confirmed rollback still produces correct diversity
+4. Compared differences between working and broken versions
+
+**Root Cause: Item Text Format Changed**
+
+The `build_item_text()` function was modified to support rich Amazon 2023 metadata (description/features), but this **unintentionally changed the text format for Beauty dataset**, creating completely different embeddings:
+
+**Old format (5e45780 - works):**
+```python
+# Simple format with periods, specific order
+if title:
+    parts.append(f"{title}.")
+if brand:
+    parts.append(f"Brand: {brand}.")  # Brand BEFORE category
+if cat:
+    parts.append(f"Category: {cat}.")
+if price:
+    parts.append(f"Price: ${float(price):.2f}.")
+
+text = " ".join(parts).strip()
+# Example: "Maybelline Lipstick. Brand: Maybelline. Category: Makeup. Price: $9.99."
+```
+
+**New format (checkpoint - fails):**
+```python
+# Different format, order, and separators
+if title:
+    parts.append(f"Product: {title}")  # Added prefix, NO period
+if cat:
+    parts.append(f"Category: {cat}")   # Category BEFORE brand
+if brand:
+    parts.append(f"Brand: {brand}")    # Brand AFTER category
+if price:
+    parts.append(f"Price: ${float(price):.2f}")  # NO period
+
+separator = "\n\n" if (has_description or has_features) else " "
+text = separator.join(parts).strip()
+# Example: "Product: Maybelline Lipstick Category: Makeup Brand: Maybelline Price: $9.99"
+```
+
+**Why This Broke RQ-VAE:**
+
+1. **Embedding Space Changed:**
+   - Different text format → different SentenceTransformer embeddings
+   - Semantic space structure fundamentally different
+   - Even minor text changes (periods, order) affect embeddings significantly
+
+2. **RQ-VAE Trained on Wrong Manifold:**
+   - RQ-VAE learns to quantize the embedding space
+   - If embeddings cluster differently, codebook learning fails
+   - Result: All items collapse to same codes (0.0% diversity)
+
+3. **Specific Breaking Changes:**
+   - Removed periods (affects sentence boundary detection)
+   - Swapped brand/category order (changes token positions)
+   - Added "Product:" prefix (adds noise to every item)
+
+**Solution: Dual-Format Support**
+
+Implemented automatic format detection in `tiger_semantic_id/src/embeddings.py`:
+
+```python
+def build_item_text(meta_df: pd.DataFrame) -> Dict[int, str]:
+    """Create a text string per item_idx from metadata DataFrame.
+
+    Supports both legacy (2014 SNAP) and rich (2023 Amazon) metadata formats.
+    - Legacy format (Beauty): Simple compact text with periods
+    - Rich format (Video_Games): Includes description/features with rich formatting
+    """
+    # Auto-detect format based on metadata columns
+    has_description = "description" in meta_df.columns
+    has_features = "features" in meta_df.columns
+    use_rich_format = has_description or has_features
+
+    if use_rich_format:
+        # Rich format for Amazon 2023 datasets (Video_Games)
+        # "Product: Title\n\nDescription: ...\n\nFeatures: ..."
+        ...
+    else:
+        # Legacy format for 2014 SNAP datasets (Beauty)
+        # "Title. Brand: X. Category: Y. Price: $Z."
+        # Preserves exact format for backward compatibility
+        ...
+```
+
+**How It Works:**
+- **Beauty dataset**: No description/features columns → uses legacy format (exact backward compatibility)
+- **Video_Games dataset**: Has description/features → uses rich format (takes advantage of metadata)
+
+**Files Modified:**
+- `tiger_semantic_id/src/embeddings.py` - Added dual-format support with auto-detection
+- Commit: `a299748` - "Fix RQ-VAE diversity issue: use legacy text format for Beauty dataset"
+
+**Key Learnings:**
+
+1. **Embedding consistency is critical** for RQ-VAE training
+   - Even small text format changes can break learned representations
+   - Backward compatibility matters when model depends on specific embeddings
+
+2. **Text formatting affects semantic embeddings**
+   - Punctuation (periods) affects sentence boundary detection
+   - Token order affects positional encodings
+   - Prefixes add noise that shifts the embedding space
+   - SentenceTransformer is sensitive to these variations
+
+3. **Always test on known good baseline** when debugging
+   - Git bisect approach: rollback to known good state
+   - Compare diffs systematically between working and broken versions
+   - Isolate variables (TPU changes vs text format changes)
+
+4. **Multi-dataset support requires format detection**
+   - Don't assume all datasets use same format
+   - Auto-detect based on available columns
+   - Preserve backward compatibility for existing datasets
+
+**Testing:**
+- ✅ Commit `5e45780` confirmed working (>50% diversity)
+- ⏳ Commit `a299748` ready for testing (should restore diversity)
+
+**Expected Results:**
+- Beauty dataset: RQ-VAE diversity restored to >50% (uses legacy format)
+- Video_Games dataset: RQ-VAE benefits from rich format (description/features)
+
+---
+
+### Missing Straight-Through Estimator Discovery (2025-10-05) 🔥 CRITICAL
 
 **Problem:** All previous attempts to train RQ-VAE failed because the encoder received NO gradients from reconstruction loss.
 
