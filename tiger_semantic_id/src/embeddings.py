@@ -94,7 +94,7 @@ def build_item_text(meta_df: pd.DataFrame) -> Dict[int, str]:
 
 def encode_items(
     item_texts: Dict[int, str], model_name: str = "sentence-t5-base", batch_size: int = 256,
-    device: str | None = None
+    device: str | None = None, device_config=None
 ) -> torch.Tensor:
     """Encode item texts with SentenceTransformer -> embeddings [num_items, hidden].
 
@@ -103,6 +103,7 @@ def encode_items(
         model_name: Name of the SentenceTransformer model
         batch_size: Batch size for encoding
         device: Device to use ('cuda', 'cpu', or None for auto-detect)
+        device_config: Optional DeviceConfig for GPU/TPU support
 
     In test environments without the dependency, monkeypatch `SentenceTransformer`
     in this module to a fake encoder that provides `.encode(...)`.
@@ -111,11 +112,13 @@ def encode_items(
         raise ImportError(
             "sentence-transformers is not installed. Install it or monkeypatch SentenceTransformer for tests."
         )
-    
-    # Auto-detect device if not specified
-    if device is None:
+
+    # Support DeviceConfig
+    if device_config is not None:
+        device = str(device_config.device)
+    elif device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     print(f"Using device: {device} for SentenceTransformer encoding")
     
     # Create model and move to specified device

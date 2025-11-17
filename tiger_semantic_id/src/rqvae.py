@@ -289,7 +289,16 @@ def train_rqvae(
     revive_every: int = 10,  # revive dead codes every N epochs
     revive_threshold: int = 5,  # codes with <N uses are considered dead
     optimizer: str = "adam",  # NEW: allow choosing optimizer type
+    log_interval: int = 50,  # print training stats every N epochs
+    device_config=None,  # NEW: Optional DeviceConfig for GPU/TPU support
 ) -> RQVAE:
+    # Support both legacy device string and new DeviceConfig
+    if device_config is not None:
+        device = device_config.device
+        print(f"Using DeviceConfig: {device_config}")
+    else:
+        print(f"Using legacy device string: {device}")
+
     model = model.to(device)
     data = data.to(device)
 
@@ -330,10 +339,15 @@ def train_rqvae(
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+
+            # TPU: Mark step for XLA graph compilation
+            if device_config is not None:
+                device_config.mark_step()
+
             total_loss += loss.item() * xb.size(0)
             total_recon += recon.item() * xb.size(0)
 
-        if ep % 5 == 0 or ep == 1:
+        if ep % log_interval == 0 or ep == 1:
             avg_loss = total_loss / N
             avg_recon = total_recon / N
             print(f"[RQVAE] epoch {ep}/{epochs} loss={avg_loss:.6f} recon_mse={avg_recon:.6f}")
@@ -364,11 +378,21 @@ def train_rqvae(
 
 
 @torch.no_grad()
-def encode_codes(model: RQVAE, data: torch.Tensor, device: str | None = None) -> torch.Tensor:
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+def encode_codes(model: RQVAE, data: torch.Tensor, device: str | None = None, device_config=None) -> torch.Tensor:
+    # Support both legacy device string and new DeviceConfig
+    if device_config is not None:
+        device = device_config.device
+    else:
+        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
     model = model.to(device); data = data.to(device)
     z = model.encoder(model.normalize(data))
     _, codes = model.codebook(z)
+
+    # TPU: Sync before moving to CPU
+    if device_config is not None and device_config.is_tpu:
+        device_config.mark_step()
+
     return codes.cpu()
 
 
