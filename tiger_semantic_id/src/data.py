@@ -13,15 +13,19 @@ import pandas as pd
 from .utils import ensure_dirs
 
 
-# Dataset URLs for Amazon 5-core datasets
+# Dataset URLs
+# - Beauty: Legacy 2014 SNAP dataset (5-core)
+# - Video_Games: Amazon Reviews 2023 dataset (full)
 DATASET_URLS = {
     "Beauty": {
         "reviews": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Beauty_5.json.gz",
         "meta": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Beauty.json.gz",
+        "format": "legacy",  # 2014 SNAP format
     },
     "Video_Games": {
-        "reviews": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Video_Games_5.json.gz",
-        "meta": "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/meta_Video_Games.json.gz",
+        "reviews": "https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/review_categories/Video_Games.jsonl.gz",
+        "meta": "https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz",
+        "format": "2023",  # Amazon Reviews 2023 format
     },
 }
 
@@ -52,13 +56,20 @@ class DatasetConfig:
         if self.dataset_name == "Beauty":
             return "reviews_Beauty_5.json.gz", "meta_Beauty.json.gz"
         elif self.dataset_name == "Video_Games":
-            return "reviews_Video_Games_5.json.gz", "meta_Video_Games.json.gz"
+            # 2023 format uses .jsonl.gz
+            return "Video_Games.jsonl.gz", "meta_Video_Games.jsonl.gz"
         else:
             # Generic fallback
             return (
                 f"reviews_{self.dataset_name}_5.json.gz",
                 f"meta_{self.dataset_name}.json.gz",
             )
+
+    def get_format(self) -> str:
+        """Get the format type for the dataset (legacy or 2023)."""
+        if self.dataset_name not in DATASET_URLS:
+            return "legacy"  # Default to legacy format
+        return DATASET_URLS[self.dataset_name].get("format", "legacy")
 
 
 # Legacy alias for backward compatibility
@@ -112,12 +123,35 @@ def _parse_json_lines(path: str) -> List[dict]:
     return rows
 
 
-def load_reviews_df(reviews_path: str) -> pd.DataFrame:
+def load_reviews_df(reviews_path: str, dataset_format: str = "legacy") -> pd.DataFrame:
+    """Load reviews DataFrame from file.
+
+    Args:
+        reviews_path: Path to reviews file
+        dataset_format: "legacy" for 2014 SNAP format, "2023" for Amazon Reviews 2023
+
+    Returns:
+        DataFrame with columns [user_id, item_id, ts]
+    """
     rows = _parse_json_lines(reviews_path)
-    df = pd.DataFrame(rows)[["reviewerID", "asin", "unixReviewTime"]]
-    df = df.rename(
-        columns={"reviewerID": "user_id", "asin": "item_id", "unixReviewTime": "ts"}
-    )
+    df = pd.DataFrame(rows)
+
+    # Handle different formats
+    if dataset_format == "2023":
+        # Amazon Reviews 2023 format
+        # user_id, parent_asin, timestamp
+        required_cols = ["user_id", "parent_asin", "timestamp"]
+        df = df[required_cols]
+        df = df.rename(columns={"parent_asin": "item_id", "timestamp": "ts"})
+    else:
+        # Legacy 2014 SNAP format
+        # reviewerID, asin, unixReviewTime
+        required_cols = ["reviewerID", "asin", "unixReviewTime"]
+        df = df[required_cols]
+        df = df.rename(
+            columns={"reviewerID": "user_id", "asin": "item_id", "unixReviewTime": "ts"}
+        )
+
     df = df.dropna()
     df["ts"] = pd.to_numeric(df["ts"], errors="coerce").astype("Int64")
     df = df.dropna()
@@ -125,47 +159,103 @@ def load_reviews_df(reviews_path: str) -> pd.DataFrame:
     return df
 
 
-def load_meta_df(meta_path: str) -> pd.DataFrame:
-    rows = _parse_json_lines(meta_path)
-    cols = ["asin", "title", "brand", "category", "categories", "price"]
-    df = pd.DataFrame(rows)
-    df = df[[c for c in cols if c in df.columns]].copy()
-    # Ensure an 'item_id' column exists regardless of field naming in source
-    if "asin" in df.columns and "item_id" not in df.columns:
-        df = df.rename(columns={"asin": "item_id"})
-    if "item_id" not in df.columns:
-        # Fallback: try common alternatives or create empty IDs to avoid KeyError downstream
-        if "id" in df.columns:
-            df["item_id"] = df["id"].astype(str)
-        else:
-            df["item_id"] = pd.Series([None] * len(df))
-    # Normalize category: keep last leaf where possible. Handle both 'category' and 'categories'
-    def leaf_any(x):
-        if isinstance(x, list) and x:
-            last = x[-1]
-            if isinstance(last, list):
-                last = last[-1] if last else None
-            return last
-        return None
+def load_meta_df(meta_path: str, dataset_format: str = "legacy") -> pd.DataFrame:
+    """Load metadata DataFrame from file.
 
-    if "category" in df.columns and df["category"].notna().any():
-        df["category_leaf"] = df["category"].apply(leaf_any)
-    elif "categories" in df.columns:
-        df["category_leaf"] = df["categories"].apply(leaf_any)
+    Args:
+        meta_path: Path to metadata file
+        dataset_format: "legacy" for 2014 SNAP format, "2023" for Amazon Reviews 2023
+
+    Returns:
+        DataFrame with columns [item_id, title, brand, category_leaf, price, description, features]
+    """
+    rows = _parse_json_lines(meta_path)
+    df = pd.DataFrame(rows)
+
+    if dataset_format == "2023":
+        # Amazon Reviews 2023 format
+        # Required columns: parent_asin, title
+        # Optional: features (list), description (list), details (dict with brand), main_category, price
+
+        # Rename parent_asin to item_id
+        if "parent_asin" in df.columns:
+            df = df.rename(columns={"parent_asin": "item_id"})
+
+        # Extract brand from details dict if present
+        if "details" in df.columns:
+            def extract_brand(details):
+                if isinstance(details, dict):
+                    # Try common brand keys
+                    for key in ["Brand", "brand", "Manufacturer", "manufacturer"]:
+                        if key in details:
+                            return details[key]
+                return None
+            df["brand"] = df["details"].apply(extract_brand)
+
+        # Use main_category as category_leaf
+        if "main_category" in df.columns:
+            df["category_leaf"] = df["main_category"]
+
+        # Join description list into single string
+        if "description" in df.columns:
+            def join_description(desc):
+                if isinstance(desc, list):
+                    return " ".join(str(d) for d in desc if d)
+                return str(desc) if desc else ""
+            df["description"] = df["description"].apply(join_description)
+
+        # Join features list into single string
+        if "features" in df.columns:
+            def join_features(feats):
+                if isinstance(feats, list):
+                    return " ".join(str(f) for f in feats if f)
+                return str(feats) if feats else ""
+            df["features"] = df["features"].apply(join_features)
+
     else:
-        df["category_leaf"] = None
+        # Legacy 2014 SNAP format
+        cols = ["asin", "title", "brand", "category", "categories", "price"]
+        df = df[[c for c in cols if c in df.columns]].copy()
+
+        # Ensure an 'item_id' column exists
+        if "asin" in df.columns and "item_id" not in df.columns:
+            df = df.rename(columns={"asin": "item_id"})
+        if "item_id" not in df.columns:
+            if "id" in df.columns:
+                df["item_id"] = df["id"].astype(str)
+            else:
+                df["item_id"] = pd.Series([None] * len(df))
+
+        # Normalize category: keep last leaf
+        def leaf_any(x):
+            if isinstance(x, list) and x:
+                last = x[-1]
+                if isinstance(last, list):
+                    last = last[-1] if last else None
+                return last
+            return None
+
+        if "category" in df.columns and df["category"].notna().any():
+            df["category_leaf"] = df["category"].apply(leaf_any)
+        elif "categories" in df.columns:
+            df["category_leaf"] = df["categories"].apply(leaf_any)
+        else:
+            df["category_leaf"] = None
+
+    # Normalize string columns
     for c in ("title", "brand", "category_leaf"):
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str).str.strip()
+
+    # Normalize price
     if "price" in df.columns:
-        # Normalize price if present
         def norm_price(x):
             try:
                 return float(x)
             except Exception:
                 return np.nan
-
         df["price"] = df["price"].apply(norm_price)
+
     return df
 
 
