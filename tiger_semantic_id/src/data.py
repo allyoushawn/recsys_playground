@@ -112,14 +112,20 @@ def _parse_json_lines(path: str) -> List[dict]:
 
     opener = gzip.open if path.endswith(".gz") else open
     rows: List[dict] = []
+    errors = 0
     with opener(path, "rb") as f:
-        for raw in f:
+        for i, raw in enumerate(f):
             try:
                 s = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
                 rows.append(json.loads(s))
-            except Exception:
+            except Exception as e:
                 # Some lines may contain trailing commas or encoding issues; skip them.
+                errors += 1
+                if errors <= 3:  # Show first 3 errors for debugging
+                    print(f"DEBUG: Line {i+1} parse error: {e}")
+                    print(f"DEBUG: Raw content (first 200 chars): {str(raw[:200])}")
                 continue
+    print(f"DEBUG: Parsed {len(rows)} rows successfully, {errors} errors")
     return rows
 
 
