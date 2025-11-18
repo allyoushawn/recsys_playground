@@ -109,23 +109,46 @@ def _parse_json_lines(path: str) -> List[dict]:
     but we keep this simple and robust.
     """
     import json
+    print(f"DEBUG _parse_json_lines: Starting to parse {path}")
+    print(f"DEBUG _parse_json_lines: File exists: {os.path.exists(path)}")
+    print(f"DEBUG _parse_json_lines: File size: {os.path.getsize(path) if os.path.exists(path) else 'N/A'}")
 
     opener = gzip.open if path.endswith(".gz") else open
+    print(f"DEBUG _parse_json_lines: Using {'gzip.open' if path.endswith('.gz') else 'open'}")
+
     rows: List[dict] = []
     errors = 0
-    with opener(path, "rb") as f:
-        for i, raw in enumerate(f):
-            try:
-                s = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
-                rows.append(json.loads(s))
-            except Exception as e:
-                # Some lines may contain trailing commas or encoding issues; skip them.
-                errors += 1
-                if errors <= 3:  # Show first 3 errors for debugging
-                    print(f"DEBUG: Line {i+1} parse error: {e}")
-                    print(f"DEBUG: Raw content (first 200 chars): {str(raw[:200])}")
-                continue
-    print(f"DEBUG: Parsed {len(rows)} rows successfully, {errors} errors")
+
+    try:
+        with opener(path, "rb") as f:
+            print(f"DEBUG _parse_json_lines: File opened successfully")
+            for i, raw in enumerate(f):
+                if i == 0:
+                    print(f"DEBUG _parse_json_lines: First line raw type: {type(raw)}")
+                    print(f"DEBUG _parse_json_lines: First line raw (first 200 chars): {raw[:200]}")
+                try:
+                    s = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+                    if i == 0:
+                        print(f"DEBUG _parse_json_lines: First line decoded: {s[:200]}")
+                    rows.append(json.loads(s))
+                    if i == 0:
+                        print(f"DEBUG _parse_json_lines: First line parsed successfully")
+                except Exception as e:
+                    # Some lines may contain trailing commas or encoding issues; skip them.
+                    errors += 1
+                    if errors <= 3:  # Show first 3 errors for debugging
+                        print(f"DEBUG: Line {i+1} parse error: {type(e).__name__}: {e}")
+                        print(f"DEBUG: Raw content (first 200 chars): {str(raw[:200])}")
+                    continue
+
+                if i > 0 and i % 10000 == 0:
+                    print(f"DEBUG _parse_json_lines: Processed {i} lines, {len(rows)} successful")
+
+    except Exception as e:
+        print(f"DEBUG _parse_json_lines: FATAL ERROR opening/reading file: {type(e).__name__}: {e}")
+        raise
+
+    print(f"DEBUG _parse_json_lines: Parsed {len(rows)} rows successfully, {errors} errors")
     return rows
 
 
@@ -139,11 +162,14 @@ def load_reviews_df(reviews_path: str, dataset_format: str = "legacy") -> pd.Dat
     Returns:
         DataFrame with columns [user_id, item_id, ts]
     """
+    print(f"DEBUG load_reviews_df: Called with path={reviews_path}, format={dataset_format}")
     rows = _parse_json_lines(reviews_path)
+    print(f"DEBUG load_reviews_df: Got {len(rows)} rows from parser")
     df = pd.DataFrame(rows)
+    print(f"DEBUG load_reviews_df: DataFrame shape: {df.shape}")
 
     # Debug: Print available columns
-    print(f"DEBUG: Available columns in {dataset_format} format: {df.columns.tolist()}")
+    print(f"DEBUG load_reviews_df: Available columns in {dataset_format} format: {df.columns.tolist()}")
 
     # Handle different formats
     if dataset_format == "2023":
