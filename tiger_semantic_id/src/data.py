@@ -136,6 +136,9 @@ def load_reviews_df(reviews_path: str, dataset_format: str = "legacy") -> pd.Dat
     rows = _parse_json_lines(reviews_path)
     df = pd.DataFrame(rows)
 
+    # Debug: Print available columns
+    print(f"DEBUG: Available columns in {dataset_format} format: {df.columns.tolist()}")
+
     # Handle different formats
     if dataset_format == "2023":
         # Amazon Reviews 2023 format
