@@ -23,8 +23,8 @@ DATASET_URLS = {
         "format": "legacy",  # 2014 SNAP format
     },
     "Video_Games": {
-        "reviews": "https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/review_categories/Video_Games.jsonl.gz",
-        "meta": "https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz",
+        "reviews": "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/review_categories/Video_Games.jsonl.gz",
+        "meta": "https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz",
         "format": "2023",  # Amazon Reviews 2023 format
     },
 }
