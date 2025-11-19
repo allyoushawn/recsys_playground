@@ -109,13 +109,17 @@ def _parse_json_lines(path: str) -> List[dict]:
     but we keep this simple and robust.
     """
     import json
-    print(f"DEBUG _parse_json_lines: Starting to parse {path}")
-    print(f"DEBUG _parse_json_lines: File exists: {os.path.exists(path)}")
+    import sys
+
+    print("=" * 80, flush=True)
+    print(f"DEBUG _parse_json_lines: FUNCTION CALLED", flush=True)
+    print(f"DEBUG _parse_json_lines: Starting to parse {path}", flush=True)
+    print(f"DEBUG _parse_json_lines: File exists: {os.path.exists(path)}", flush=True)
     if os.path.exists(path):
         print(f"DEBUG _parse_json_lines: File size: {os.path.getsize(path)} bytes")
 
     opener = gzip.open if path.endswith(".gz") else open
-    print(f"DEBUG _parse_json_lines: Using {'gzip.open' if path.endswith('.gz') else 'open'}")
+    print(f"DEBUG _parse_json_lines: Using {'gzip.open' if path.endswith('.gz') else 'open'}", flush=True)
 
     rows: List[dict] = []
     errors = 0
@@ -123,7 +127,7 @@ def _parse_json_lines(path: str) -> List[dict]:
 
     try:
         with opener(path, "rb") as f:
-            print(f"DEBUG _parse_json_lines: File opened successfully")
+            print(f"DEBUG _parse_json_lines: File opened successfully", flush=True)
             for i, raw in enumerate(f):
                 line_count = i + 1
                 if i == 0:
@@ -155,9 +159,12 @@ def _parse_json_lines(path: str) -> List[dict]:
         traceback.print_exc()
         raise
 
-    print(f"DEBUG _parse_json_lines: Completed. Total lines: {line_count}, Parsed: {len(rows)}, Errors: {errors}")
+    print(f"DEBUG _parse_json_lines: Completed. Total lines: {line_count}, Parsed: {len(rows)}, Errors: {errors}", flush=True)
     if len(rows) > 0:
-        print(f"DEBUG _parse_json_lines: Sample keys from first row: {list(rows[0].keys())}")
+        print(f"DEBUG _parse_json_lines: Sample keys from first row: {list(rows[0].keys())}", flush=True)
+    else:
+        print(f"DEBUG _parse_json_lines: WARNING - Returning EMPTY list!", flush=True)
+    print("=" * 80, flush=True)
     return rows
 
 
@@ -171,9 +178,13 @@ def load_reviews_df(reviews_path: str, dataset_format: str = "legacy") -> pd.Dat
     Returns:
         DataFrame with columns [user_id, item_id, ts]
     """
-    print(f"DEBUG load_reviews_df: Called with path={reviews_path}, format={dataset_format}")
+    print(f"\n{'='*80}", flush=True)
+    print(f"DEBUG load_reviews_df: STARTING", flush=True)
+    print(f"DEBUG load_reviews_df: Called with path={reviews_path}, format={dataset_format}", flush=True)
+    print(f"DEBUG load_reviews_df: About to call _parse_json_lines...", flush=True)
     rows = _parse_json_lines(reviews_path)
-    print(f"DEBUG load_reviews_df: Got {len(rows)} rows from parser")
+    print(f"DEBUG load_reviews_df: Back from _parse_json_lines", flush=True)
+    print(f"DEBUG load_reviews_df: Got {len(rows)} rows from parser", flush=True)
     df = pd.DataFrame(rows)
     print(f"DEBUG load_reviews_df: DataFrame shape: {df.shape}")
 
