@@ -109,62 +109,17 @@ def _parse_json_lines(path: str) -> List[dict]:
     but we keep this simple and robust.
     """
     import json
-    import sys
-
-    print("=" * 80, flush=True)
-    print(f"DEBUG _parse_json_lines: FUNCTION CALLED", flush=True)
-    print(f"DEBUG _parse_json_lines: Starting to parse {path}", flush=True)
-    print(f"DEBUG _parse_json_lines: File exists: {os.path.exists(path)}", flush=True)
-    if os.path.exists(path):
-        print(f"DEBUG _parse_json_lines: File size: {os.path.getsize(path)} bytes")
 
     opener = gzip.open if path.endswith(".gz") else open
-    print(f"DEBUG _parse_json_lines: Using {'gzip.open' if path.endswith('.gz') else 'open'}", flush=True)
-
     rows: List[dict] = []
-    errors = 0
-    line_count = 0
-
-    try:
-        with opener(path, "rb") as f:
-            print(f"DEBUG _parse_json_lines: File opened successfully", flush=True)
-            for i, raw in enumerate(f):
-                line_count = i + 1
-                if i == 0:
-                    print(f"DEBUG _parse_json_lines: First line type: {type(raw)}")
-                    print(f"DEBUG _parse_json_lines: First line (first 300 chars): {raw[:300]}")
-                try:
-                    s = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
-                    if i == 0:
-                        print(f"DEBUG _parse_json_lines: First line decoded (first 300 chars): {s[:300]}")
-                    parsed = json.loads(s)
-                    if i == 0:
-                        print(f"DEBUG _parse_json_lines: First line parsed successfully")
-                        print(f"DEBUG _parse_json_lines: First line keys: {list(parsed.keys())}")
-                    rows.append(parsed)
-                except Exception as e:
-                    errors += 1
-                    if errors <= 5:  # Show first 5 errors
-                        print(f"DEBUG: Line {i+1} parse error: {type(e).__name__}: {e}")
-                        if i < 5:  # Show raw content for first 5 lines only
-                            print(f"DEBUG: Raw content (first 200 chars): {str(raw[:200])}")
-                    continue
-
-                if i > 0 and i % 100000 == 0:
-                    print(f"DEBUG _parse_json_lines: Processed {i} lines, {len(rows)} successful")
-
-    except Exception as e:
-        print(f"DEBUG _parse_json_lines: FATAL ERROR: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-
-    print(f"DEBUG _parse_json_lines: Completed. Total lines: {line_count}, Parsed: {len(rows)}, Errors: {errors}", flush=True)
-    if len(rows) > 0:
-        print(f"DEBUG _parse_json_lines: Sample keys from first row: {list(rows[0].keys())}", flush=True)
-    else:
-        print(f"DEBUG _parse_json_lines: WARNING - Returning EMPTY list!", flush=True)
-    print("=" * 80, flush=True)
+    with opener(path, "rb") as f:
+        for raw in f:
+            try:
+                s = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+                rows.append(json.loads(s))
+            except Exception:
+                # Some lines may contain trailing commas or encoding issues; skip them.
+                continue
     return rows
 
 
@@ -178,15 +133,8 @@ def load_reviews_df(reviews_path: str, dataset_format: str = "legacy") -> pd.Dat
     Returns:
         DataFrame with columns [user_id, item_id, ts]
     """
-    print(f"\n{'='*80}", flush=True)
-    print(f"DEBUG load_reviews_df: STARTING", flush=True)
-    print(f"DEBUG load_reviews_df: Called with path={reviews_path}, format={dataset_format}", flush=True)
-    print(f"DEBUG load_reviews_df: About to call _parse_json_lines...", flush=True)
     rows = _parse_json_lines(reviews_path)
-    print(f"DEBUG load_reviews_df: Back from _parse_json_lines", flush=True)
-    print(f"DEBUG load_reviews_df: Got {len(rows)} rows from parser", flush=True)
     df = pd.DataFrame(rows)
-    print(f"DEBUG load_reviews_df: DataFrame shape: {df.shape}")
 
     # Handle different formats
     if dataset_format == "2023":
