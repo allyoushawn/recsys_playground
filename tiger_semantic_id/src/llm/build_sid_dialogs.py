@@ -86,37 +86,72 @@ def create_sid_to_title_dialogs(
     semantic_ids: np.ndarray,
     item_metadata: dict[int, dict],
 ) -> list[dict]:
-    """Create Type A dialogs: SID → Title.
+    """Create Type A dialogs: SID → Text (title, description, features, category).
+
+    Generates multiple variations per item to match reference implementation:
+    - SID → Title
+    - SID → Description
+    - SID → Features
+    - SID → Category
 
     Args:
         semantic_ids: Array of shape [num_items, 4]
-        item_metadata: Dict mapping item_id -> {'title': str, ...}
+        item_metadata: Dict mapping item_id -> {'title': str, 'description': str, 'features': str, 'category_leaf': str, ...}
 
     Returns:
         List of dialog dicts
     """
     dialogs = []
 
-    for item_id, sid in enumerate(tqdm(semantic_ids, desc="Building SID→Title dialogs")):
+    # Define question templates for each metadata type
+    templates = {
+        'title': [
+            ("What product has Semantic ID: {sid}?", "title"),
+            ("What is the name of product {sid}?", "title"),
+        ],
+        'description': [
+            ("Describe the product with Semantic ID: {sid}", "description"),
+            ("What is product {sid}?", "description"),
+        ],
+        'features': [
+            ("What are the key features of product {sid}?", "features"),
+            ("List the features of {sid}", "features"),
+        ],
+        'category_leaf': [
+            ("What category does product {sid} belong to?", "category"),
+        ],
+    }
+
+    for item_id, sid in enumerate(tqdm(semantic_ids, desc="Building SID→Text dialogs")):
         # Skip items without metadata
-        if item_id not in item_metadata or 'title' not in item_metadata[item_id]:
+        if item_id not in item_metadata:
             continue
 
-        title = item_metadata[item_id]['title']
-        if not title or title.strip() == '':
-            continue
-
+        metadata = item_metadata[item_id]
         sid_str = format_sid_tokens(sid)
 
-        dialog = {
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"What product has Semantic ID: {sid_str}?"},
-                {"role": "assistant", "content": title},
-            ],
-            "type": "sid_to_title",
-        }
-        dialogs.append(dialog)
+        # Generate variations for each available metadata field
+        for field_name, field_templates in templates.items():
+            if field_name not in metadata:
+                continue
+
+            field_value = metadata[field_name]
+            if not field_value or (isinstance(field_value, str) and field_value.strip() == ''):
+                continue
+
+            # Generate dialog for each template
+            for question_template, dialog_type in field_templates:
+                user_msg = question_template.format(sid=sid_str)
+
+                dialog = {
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                        {"role": "assistant", "content": str(field_value)},
+                    ],
+                    "type": f"sid_to_{dialog_type}",
+                }
+                dialogs.append(dialog)
 
     return dialogs
 
@@ -126,11 +161,16 @@ def create_title_to_sid_dialogs(
     item_metadata: dict[int, dict],
     augment: bool = True,
 ) -> list[dict]:
-    """Create Type B dialogs: Title → SID.
+    """Create Type B dialogs: Text → SID (title, description, features).
+
+    Generates reverse mappings from multiple input types to match reference:
+    - Title → SID (3 templates)
+    - Description → SID (3 templates)
+    - Features → SID (3 templates)
 
     Args:
         semantic_ids: Array of shape [num_items, 4]
-        item_metadata: Dict mapping item_id -> {'title': str, ...}
+        item_metadata: Dict mapping item_id -> {'title': str, 'description': str, 'features': str, ...}
         augment: If True, create variations with different prompts
 
     Returns:
@@ -138,39 +178,57 @@ def create_title_to_sid_dialogs(
     """
     dialogs = []
 
-    # Different prompt templates for augmentation
-    templates = [
-        "What is the Semantic ID for '{title}'?",
-        "Find the SID for product: {title}",
-        "Product: {title}. What's its SID?",
-    ]
+    # Different prompt templates for each input type
+    templates_by_field = {
+        'title': [
+            ("What is the Semantic ID for '{text}'?", "title_to_sid"),
+            ("Find the SID for product: {text}", "title_to_sid"),
+            ("Product: {text}. What's its SID?", "title_to_sid"),
+        ],
+        'description': [
+            ("What is the SID for this product description: {text}", "description_to_sid"),
+            ("Find the Semantic ID for: {text}", "description_to_sid"),
+            ("Product description: {text}. What's the SID?", "description_to_sid"),
+        ],
+        'features': [
+            ("What product has these features: {text}. What's its SID?", "features_to_sid"),
+            ("Find the Semantic ID for product with features: {text}", "features_to_sid"),
+            ("Product features: {text}. SID?", "features_to_sid"),
+        ],
+    }
 
-    for item_id, sid in enumerate(tqdm(semantic_ids, desc="Building Title→SID dialogs")):
+    for item_id, sid in enumerate(tqdm(semantic_ids, desc="Building Text→SID dialogs")):
         # Skip items without metadata
-        if item_id not in item_metadata or 'title' not in item_metadata[item_id]:
+        if item_id not in item_metadata:
             continue
 
-        title = item_metadata[item_id]['title']
-        if not title or title.strip() == '':
-            continue
-
+        metadata = item_metadata[item_id]
         sid_str = format_sid_tokens(sid)
 
-        # Generate base example + augmented variations
-        num_variations = len(templates) if augment else 1
-        for i in range(num_variations):
-            template = templates[i] if augment else templates[0]
-            user_msg = template.format(title=title)
+        # Generate dialogs for each available field
+        for field_name, field_templates in templates_by_field.items():
+            if field_name not in metadata:
+                continue
 
-            dialog = {
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": sid_str},
-                ],
-                "type": "title_to_sid",
-            }
-            dialogs.append(dialog)
+            field_value = metadata[field_name]
+            if not field_value or (isinstance(field_value, str) and field_value.strip() == ''):
+                continue
+
+            # Generate variations with different templates
+            num_variations = len(field_templates) if augment else 1
+            for i in range(num_variations):
+                template, dialog_type = field_templates[i] if augment else field_templates[0]
+                user_msg = template.format(text=str(field_value))
+
+                dialog = {
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                        {"role": "assistant", "content": sid_str},
+                    ],
+                    "type": dialog_type,
+                }
+                dialogs.append(dialog)
 
     return dialogs
 
@@ -554,18 +612,26 @@ def main():
     print("="*60)
 
     if "A" in data_types:
-        print("\n[Type A] SID → Title")
+        print("\n[Type A] SID → Text (title, description, features, category)")
         type_a_dialogs = create_sid_to_title_dialogs(semantic_ids, item_metadata)
         all_dialogs.extend(type_a_dialogs)
-        type_stats["A_sid_to_title"] = len(type_a_dialogs)
-        print(f"  Generated {len(type_a_dialogs):,} examples")
+        # Count by subtype
+        for subtype in ["sid_to_title", "sid_to_description", "sid_to_features", "sid_to_category"]:
+            count = sum(1 for d in type_a_dialogs if d.get("type") == subtype)
+            if count > 0:
+                type_stats[f"A_{subtype}"] = count
+        print(f"  Generated {len(type_a_dialogs):,} examples (multiple variations per item)")
 
     if "B" in data_types:
-        print("\n[Type B] Title → SID")
+        print("\n[Type B] Text → SID (title, description, features)")
         type_b_dialogs = create_title_to_sid_dialogs(semantic_ids, item_metadata, augment=True)
         all_dialogs.extend(type_b_dialogs)
-        type_stats["B_title_to_sid"] = len(type_b_dialogs)
-        print(f"  Generated {len(type_b_dialogs):,} examples (with augmentation)")
+        # Count by subtype
+        for subtype in ["title_to_sid", "description_to_sid", "features_to_sid"]:
+            count = sum(1 for d in type_b_dialogs if d.get("type") == subtype)
+            if count > 0:
+                type_stats[f"B_{subtype}"] = count
+        print(f"  Generated {len(type_b_dialogs):,} examples (3 templates per input type)")
 
     if "C" in data_types:
         print(f"\n[Type C] Next-Item Prediction (history lengths: {history_lengths})")
