@@ -259,6 +259,104 @@ def load_meta_df(meta_path: str, dataset_format: str = "legacy") -> pd.DataFrame
     return df
 
 
+def filter_items_by_metadata(
+    items_df: pd.DataFrame,
+    min_title_length: int = 20,
+    min_description_length: int = 100,
+) -> pd.DataFrame:
+    """Filter items to match reference implementation's metadata requirements.
+
+    Reference implementation (semantic-ids-llm) requires:
+    - Title must be >= 20 characters
+    - Description must be >= 100 characters
+    - Items without BOTH are excluded
+
+    Args:
+        items_df: DataFrame with columns [item_id, title, description, ...]
+        min_title_length: Minimum title length (default: 20)
+        min_description_length: Minimum description length (default: 100)
+
+    Returns:
+        Filtered DataFrame with only items meeting metadata requirements
+    """
+    initial_count = len(items_df)
+
+    # Ensure title and description columns exist
+    if "title" not in items_df.columns:
+        print(f"⚠️  Warning: 'title' column not found. Returning empty DataFrame.")
+        return items_df.iloc[:0]
+
+    if "description" not in items_df.columns:
+        print(f"⚠️  Warning: 'description' column not found. Returning empty DataFrame.")
+        return items_df.iloc[:0]
+
+    # Filter by title length
+    items_df = items_df.copy()
+    items_df["title_len"] = items_df["title"].fillna("").astype(str).str.len()
+    items_df = items_df[items_df["title_len"] >= min_title_length]
+    after_title = len(items_df)
+
+    # Filter by description length
+    items_df["desc_len"] = items_df["description"].fillna("").astype(str).str.len()
+    items_df = items_df[items_df["desc_len"] >= min_description_length]
+    after_desc = len(items_df)
+
+    # Remove temporary columns
+    items_df = items_df.drop(columns=["title_len", "desc_len"])
+
+    print(f"\n📊 Metadata filtering results:")
+    print(f"  Initial items: {initial_count:,}")
+    print(f"  After title filter (≥{min_title_length} chars): {after_title:,} ({100*after_title/initial_count:.1f}%)")
+    print(f"  After description filter (≥{min_description_length} chars): {after_desc:,} ({100*after_desc/initial_count:.1f}%)")
+    print(f"  Removed: {initial_count - after_desc:,} ({100*(initial_count - after_desc)/initial_count:.1f}%)")
+
+    return items_df
+
+
+def filter_sequences_by_valid_items(
+    reviews_df: pd.DataFrame,
+    valid_item_ids: set,
+    min_sequence_length: int = 3,
+) -> pd.DataFrame:
+    """Filter user sequences to only include valid items, matching reference implementation.
+
+    Reference implementation:
+    1. Filters sequences to only include items with valid metadata
+    2. Removes sequences that fall below min_sequence_length after filtering
+
+    Args:
+        reviews_df: DataFrame with columns [user_id, item_id, ts]
+        valid_item_ids: Set of item_ids that passed metadata filtering
+        min_sequence_length: Minimum sequence length after filtering (default: 3)
+
+    Returns:
+        Filtered DataFrame with only valid items and sequences
+    """
+    initial_count = len(reviews_df)
+    initial_users = reviews_df["user_id"].nunique()
+
+    # Filter to only valid items
+    filtered = reviews_df[reviews_df["item_id"].isin(valid_item_ids)].copy()
+    after_item_filter = len(filtered)
+
+    # Count sequence lengths per user
+    seq_lengths = filtered.groupby("user_id").size()
+    valid_users = set(seq_lengths[seq_lengths >= min_sequence_length].index)
+
+    # Keep only users with sufficient sequence length
+    filtered = filtered[filtered["user_id"].isin(valid_users)]
+    final_count = len(filtered)
+    final_users = filtered["user_id"].nunique()
+
+    print(f"\n📊 Sequence filtering results:")
+    print(f"  Initial interactions: {initial_count:,} from {initial_users:,} users")
+    print(f"  After item filter: {after_item_filter:,} ({100*after_item_filter/initial_count:.1f}%)")
+    print(f"  After min length filter (≥{min_sequence_length}): {final_count:,} from {final_users:,} users")
+    print(f"  Removed: {initial_count - final_count:,} interactions, {initial_users - final_users:,} users ({100*(initial_users - final_users)/initial_users:.1f}%)")
+
+    return filtered
+
+
 def filter_and_split(
     reviews: pd.DataFrame, cfg: DatasetConfig
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

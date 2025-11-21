@@ -343,11 +343,17 @@ def create_copurchase_dialogs(
     Args:
         semantic_ids: Array of shape [num_items, 4]
         user_sequences: Dict mapping user_id -> list of item_ids
-        top_k: Consider top K co-purchased items
-        examples_per_item: Number of examples to generate per item
+        top_k: Consider top K co-purchased items (set to -1 for exhaustive mode)
+        examples_per_item: Number of examples to generate per item (if > top_k, uses exhaustive mode)
 
     Returns:
         List of dialog dicts
+
+    Note:
+        Reference implementation uses exhaustive mode, generating examples for ALL co-occurring
+        pairs within the window. To match reference, use exhaustive mode by setting:
+        - examples_per_item > top_k (e.g., examples_per_item=30, top_k=10)
+        - OR top_k=-1 (explicitly request exhaustive mode)
     """
     dialogs = []
     num_items = len(semantic_ids)
@@ -363,10 +369,15 @@ def create_copurchase_dialogs(
         sid = semantic_ids[item_id]
         sid_str = format_sid_tokens(sid)
 
-        # Get top K co-purchased items
-        co_items = cooccurrence[item_id][:top_k]
+        # Get co-purchased items (exhaustive if examples_per_item > top_k or top_k == -1)
+        if examples_per_item > top_k or top_k == -1:
+            # Exhaustive mode: use ALL co-occurring items (matches reference implementation)
+            co_items = cooccurrence[item_id]
+        else:
+            # Limited mode: use only top K
+            co_items = cooccurrence[item_id][:top_k]
 
-        # Generate multiple examples (sample from top K)
+        # Generate examples up to examples_per_item
         num_examples = min(examples_per_item, len(co_items))
         for i in range(num_examples):
             if i >= len(co_items):
