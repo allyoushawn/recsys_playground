@@ -1,0 +1,673 @@
+# Investigation Notebook Analysis: investigate_llm_data.ipynb
+
+**Date:** 2025-11-21
+**Status:** BROKEN - Multiple path and conceptual mismatches
+
+---
+
+## Executive Summary
+
+The investigation notebook `investigate_llm_data.ipynb` has **critical path issues** that prevent all phases from executing. It's looking for raw data files in the wrong locations and using incorrect assumptions about where artifacts are stored in the local (non-Colab) environment.
+
+**Key Problems:**
+1. **Wrong artifact paths** - Looking in Google Drive Colab paths instead of local project structure
+2. **Missing raw data files** - Expects `item_metadata.json` in RQ-VAE artifacts but it's actually in LLM artifacts
+3. **Incorrect assumptions** - Assumes Colab structure but notebook exists in local repo
+4. **All phases skipped** - Phases 2-4 skip because Phase 1 fails to load required data
+
+---
+
+## Detailed Issues by Phase
+
+### Phase 1: Raw Dataset Verification (BROKEN)
+
+**Cell 5 - Looking for wrong file:**
+```python
+meta_file = DATA_DIR / 'item_metadata.json'
+```
+
+**Problem:** This path resolves to:
+```
+/content/drive/MyDrive/colab/tiger_semantic_id/rq_vae_building/artifacts/item_metadata.json
+```
+
+But the notebook is running LOCALLY (not in Colab), so:
+- `/content/drive/` doesn't exist
+- Even if running in Colab, `item_metadata.json` is in **LLM artifacts**, not RQ-VAE artifacts
+
+**Actual location (Colab):**
+```
+/content/drive/MyDrive/colab/tiger_semantic_id/rq_vae_building/artifacts/item_metadata.json
+```
+
+**Actual location (Local - doesn't exist):**
+The local repository doesn't download or store the Google Drive artifacts. The pipeline is:
+1. `TIGER_SemanticID_data_preparation.ipynb` → Creates artifacts in Colab Drive
+2. `TIGER_SemanticID.ipynb` → Loads from Colab Drive, adds more artifacts
+3. `TIGER_SemanticID_LLM_finetune.ipynb` → Creates LLM artifacts in separate folder
+
+**Cell 6 - Looking for wrong file again:**
+```python
+item_meta_file = ARTIFACTS_DIR / 'item_metadata.json'
+```
+
+This fails because:
+1. Path is still Colab-style (`/content/drive/...`)
+2. File doesn't exist in local repo
+3. Even in Colab, this is the wrong directory (should be LLM_DIR, not ARTIFACTS_DIR)
+
+**Output shows:**
+```
+❌ item_metadata.json not found!
+   Expected location: /Users/fox/Projects/CodexProjects/recsys_playground/tiger_semantic_id/artifacts/item_metadata.json
+```
+
+But this path doesn't exist because the local repo doesn't have the Colab artifacts.
+
+---
+
+### Phase 2: Metadata Quality Analysis (SKIPPED)
+
+**Cell 8-9 - Skipped due to Phase 1 failure:**
+```python
+if 'item_metadata' in locals():
+    # Analyze field availability...
+else:
+    print("\n⚠️  Skipping - item_metadata not loaded")
+```
+
+**Output:**
+```
+⚠️  Skipping - item_metadata not loaded
+```
+
+This entire phase is useless because the prerequisite data wasn't loaded.
+
+---
+
+### Phase 3: Co-occurrence Analysis (BROKEN)
+
+**Cell 11 - Wrong path for user sequences:**
+```python
+user_seq_file = LLM_DIR / 'user_sequences.json'
+```
+
+**Resolves to:**
+```
+/content/drive/MyDrive/colab/tiger_semantic_id/llm_finetuning/user_sequences.json
+```
+
+**Problem:**
+- This is a Colab path that doesn't exist locally
+- Even if it existed, the notebook isn't running in Colab environment
+
+**Output:**
+```
+❌ user_sequences.json not found at /Users/fox/Projects/CodexProjects/recsys_playground/tiger_semantic_id/llm_artifacts/user_sequences.json
+```
+
+Note: The path changed from LLM_DIR to `llm_artifacts` in the output, suggesting some path mapping issue.
+
+**Cells 12-13 - Skipped:**
+All subsequent co-occurrence analysis skipped because `user_sequences` wasn't loaded.
+
+---
+
+### Phase 4: Root Cause Summary (MISLEADING)
+
+**Cell 15 - False positive:**
+```
+✅ No critical issues found! Data looks good.
+```
+
+This is **completely wrong** because:
+1. No data was actually loaded
+2. All phases were skipped
+3. The check logic only runs if variables exist, so empty results = no findings
+
+---
+
+## Root Cause: Path and Environment Mismatch
+
+### Conceptual Mismatch
+
+The notebook was written for **Google Colab** but exists in a **local repository**:
+
+| Aspect | Colab (Expected) | Local Repo (Actual) |
+|--------|------------------|---------------------|
+| Data location | `/content/drive/MyDrive/colab/tiger_semantic_id/` | Not stored in repo |
+| RQ-VAE artifacts | `rq_vae_building/artifacts/` | N/A (Colab only) |
+| LLM artifacts | `llm_finetuning/` | N/A (Colab only) |
+| Execution environment | Colab notebook | Local Jupyter/Python |
+
+### Directory Structure Reality
+
+**What the notebook expects (Colab):**
+```
+/content/drive/MyDrive/colab/tiger_semantic_id/
+├── data_preparation/
+│   └── artifacts/
+│       ├── item_metadata.json (WRONG - this doesn't exist here)
+│       ├── train_df.pkl
+│       └── ...
+├── rq_vae_building/
+│   └── artifacts/
+│       ├── item_metadata.json (Generated by TIGER_SemanticID.ipynb)
+│       ├── semantic_ids.npy
+│       └── ...
+└── llm_finetuning/
+    ├── item_metadata.json (Filtered version from Cell 9)
+    ├── user_sequences.json
+    └── ...
+```
+
+**What actually exists locally:**
+```
+/Users/fox/Projects/CodexProjects/recsys_playground/
+├── notebooks/
+│   └── tiger_semantic_id/
+│       ├── investigate_llm_data.ipynb (This notebook - BROKEN)
+│       ├── TIGER_SemanticID.ipynb (Colab only)
+│       └── TIGER_SemanticID_LLM_finetune.ipynb (Colab only)
+└── tiger_semantic_id/
+    ├── src/
+    └── tests/
+```
+
+The local repo does NOT contain any of the Colab artifacts because they're stored in Google Drive.
+
+---
+
+## Correct Data Flow (According to Notebooks)
+
+### 1. Data Preparation Phase
+**Notebook:** `TIGER_SemanticID_data_preparation.ipynb`
+**Outputs to:** `/content/drive/.../data_preparation/artifacts/`
+```
+- train_df.pkl, val_df.pkl, test_df.pkl
+- items.pkl
+- user2id.json, item2id.json
+- item_embeddings.pt
+- item_texts.json
+- config.json
+```
+
+**Key:** NO item_metadata.json here (just items.pkl with all columns)
+
+### 2. RQ-VAE Training Phase
+**Notebook:** `TIGER_SemanticID.ipynb`
+**Reads from:** `data_preparation/artifacts/`
+**Outputs to:** `/content/drive/.../rq_vae_building/artifacts/`
+
+**Cell "llm_prep_artifacts" generates:**
+```python
+# This cell creates item_metadata.json from items DataFrame
+item_metadata = {}
+for row in items.itertuples():
+    item_idx = int(row.item_idx)
+    title = getattr(row, 'title', None)
+    # ... extract description, features, category_leaf ...
+    item_metadata[str(item_idx)] = meta
+
+# Saves to rq_vae_building/artifacts/item_metadata.json
+```
+
+So `item_metadata.json` is **generated** here, containing:
+- 80,840 items (full metadata extraction)
+- Fields: title, description, features, category_leaf, brand, price
+
+### 3. LLM Filtering Phase
+**Notebook:** `TIGER_SemanticID_LLM_finetune.ipynb`
+**Reads from:** `rq_vae_building/artifacts/`
+**Outputs to:** `/content/drive/.../llm_finetuning/`
+
+**Cell 9 filters metadata:**
+```python
+# Loads item_metadata.json from RQVAE_DIR
+# Filters by: title ≥20 chars AND description ≥100 chars
+# Result: 80,840 → 42,100 items
+# Saves filtered version to LLM_DIR/item_metadata.json
+```
+
+So there are **TWO** `item_metadata.json` files:
+1. **RQ-VAE artifacts** (80,840 items, unfiltered)
+2. **LLM artifacts** (42,100 items, filtered)
+
+---
+
+## What the Investigation Notebook Should Do
+
+### Correct Path Logic
+
+The notebook should detect the environment and use appropriate paths:
+
+```python
+import os
+from pathlib import Path
+
+# Detect environment
+IN_COLAB = 'COLAB_GPU' in os.environ or os.path.exists('/content/drive')
+
+if IN_COLAB:
+    # Running in Colab - use Google Drive paths
+    WORK_DIR = Path('/content/drive/MyDrive/colab/tiger_semantic_id')
+    RQVAE_DIR = WORK_DIR / 'rq_vae_building' / 'artifacts'
+    LLM_DIR = WORK_DIR / 'llm_finetuning'
+else:
+    # Running locally - artifacts don't exist, need to inform user
+    print("="*60)
+    print("ENVIRONMENT ERROR")
+    print("="*60)
+    print("This notebook requires Colab artifacts that are not available locally.")
+    print("Please run this notebook in Google Colab where the artifacts are stored.")
+    print("="*60)
+    raise RuntimeError("Notebook must run in Colab environment")
+```
+
+### Correct File Expectations
+
+**Phase 1: Raw Dataset Verification**
+- Should check `RQVAE_DIR / 'item_metadata.json'` (not DATA_DIR)
+- This is the 80,840 item unfiltered version
+- Explains why we start with 80K items instead of 137K
+
+**Phase 2: Metadata Quality Analysis**
+- Should use the item_metadata.json from RQVAE_DIR
+- Analyze field coverage (description, features, category_leaf)
+- Show what percentage pass filtering thresholds
+
+**Phase 3: Co-occurrence Analysis**
+- Should load `LLM_DIR / 'user_sequences.json'` (filtered version)
+- This is the 101,409 users with 6.18 avg sequence length
+- Build co-occurrence matrix and estimate Type E examples
+
+**Phase 4: Root Cause Summary**
+- Should actually check if data was loaded
+- Compare filtered vs unfiltered statistics
+- Identify the 80K vs 137K item gap
+
+---
+
+## Recommended Fixes
+
+### Fix 1: Add Environment Detection (Critical)
+
+Add this at the beginning of the notebook:
+
+```python
+# Detect environment
+import os
+from pathlib import Path
+
+IN_COLAB = 'COLAB_GPU' in os.environ or os.path.exists('/content/drive')
+
+if not IN_COLAB:
+    print("="*60)
+    print("ENVIRONMENT ERROR")
+    print("="*60)
+    print("This investigation notebook requires Colab artifacts.")
+    print("Please run this notebook in Google Colab.")
+    print("="*60)
+    raise RuntimeError("Must run in Colab environment with artifacts")
+
+# Setup paths (Colab only)
+WORK_DIR = Path('/content/drive/MyDrive/colab/tiger_semantic_id')
+RQVAE_DIR = WORK_DIR / 'rq_vae_building' / 'artifacts'
+LLM_DIR = WORK_DIR / 'llm_finetuning'
+
+print(f"Running in Colab environment")
+print(f"RQ-VAE artifacts: {RQVAE_DIR}")
+print(f"LLM artifacts: {LLM_DIR}")
+```
+
+### Fix 2: Correct Phase 1 Paths
+
+Replace Cell 5:
+```python
+print("=" * 60)
+print("PHASE 1: RAW DATASET VERIFICATION")
+print("=" * 60)
+
+# Check the UNFILTERED metadata from RQ-VAE artifacts
+meta_file = RQVAE_DIR / 'item_metadata.json'
+
+print(f"\n[1.1] Checking item_metadata.json (unfiltered)...")
+print(f"Path: {meta_file}")
+print(f"Exists: {meta_file.exists()}")
+
+if meta_file.exists():
+    file_size_mb = meta_file.stat().st_size / (1024**2)
+    print(f"File size: {file_size_mb:.1f} MB")
+
+    # Load and count
+    with open(meta_file, 'r') as f:
+        item_metadata = json.load(f)
+
+    print(f"\n" + "=" * 60)
+    print(f"RAW DATASET STATISTICS")
+    print("=" * 60)
+    print(f"Total items: {len(item_metadata):,}")
+    print(f"Expected: ~80,840 (from our extraction)")
+    print(f"Reference: ~137,269 (from full Amazon 2023 Video Games)")
+    print(f"Gap: {137269 - len(item_metadata):,} items ({100*(137269-len(item_metadata))/137269:.1f}%)")
+
+    if len(item_metadata) < 70000:
+        print("\n⚠️  WARNING: Item count is suspiciously low!")
+    elif len(item_metadata) < 100000:
+        print("\n⚠️  Item count suggests we're missing data from Amazon 2023")
+        print("   This is likely due to incomplete dataset download or parsing errors")
+    else:
+        print("\n✅ Item count looks reasonable!")
+    print("=" * 60)
+else:
+    print("\n❌ item_metadata.json not found!")
+    print(f"   Expected location: {meta_file}")
+    print(f"   This file should be generated by TIGER_SemanticID.ipynb")
+```
+
+### Fix 3: Correct Phase 2 - Analyze Metadata Quality
+
+```python
+print("=" * 60)
+print("PHASE 2: METADATA QUALITY ANALYSIS")
+print("=" * 60)
+
+if 'item_metadata' in locals() and item_metadata:
+    # Analyze field availability
+    field_stats = {
+        'title': {'count': 0, 'lengths': []},
+        'description': {'count': 0, 'lengths': []},
+        'features': {'count': 0, 'lengths': []},
+        'category_leaf': {'count': 0, 'lengths': []}
+    }
+
+    for item_id, meta in item_metadata.items():
+        for field in field_stats.keys():
+            if field in meta and meta[field]:
+                field_stats[field]['count'] += 1
+                field_stats[field]['lengths'].append(len(str(meta[field])))
+
+    print("\n[2.1] Field Availability")
+    print("-" * 60)
+    total_items = len(item_metadata)
+
+    for field, stats in field_stats.items():
+        count = stats['count']
+        pct = 100 * count / total_items if total_items > 0 else 0
+
+        if stats['lengths']:
+            avg_len = np.mean(stats['lengths'])
+            min_len = np.min(stats['lengths'])
+            max_len = np.max(stats['lengths'])
+            print(f"{field:15s}: {count:6,} ({pct:5.1f}%) | avg={avg_len:6.1f} chars (min={min_len}, max={max_len})")
+        else:
+            print(f"{field:15s}: {count:6,} ({pct:5.1f}%) | NO DATA")
+
+    # Check filtering impact
+    print("\n[2.2] Filtering Impact Analysis")
+    print("-" * 60)
+    print("LLM filtering requirements:")
+    print("  - Title length ≥ 20 characters")
+    print("  - Description length ≥ 100 characters")
+    print("  - Items must have BOTH to pass\n")
+
+    title_valid = 0
+    desc_valid = 0
+    both_valid = 0
+
+    for meta in item_metadata.values():
+        has_title = 'title' in meta and len(str(meta['title'])) >= 20
+        has_desc = 'description' in meta and len(str(meta['description'])) >= 100
+
+        if has_title:
+            title_valid += 1
+        if has_desc:
+            desc_valid += 1
+        if has_title and has_desc:
+            both_valid += 1
+
+    print(f"Items with title ≥20 chars:       {title_valid:6,} ({100*title_valid/total_items:5.1f}%)")
+    print(f"Items with description ≥100 chars: {desc_valid:6,} ({100*desc_valid/total_items:5.1f}%)")
+    print(f"Items passing BOTH filters:        {both_valid:6,} ({100*both_valid/total_items:5.1f}%)")
+
+    # Compare with actual filtered data
+    filtered_meta_file = LLM_DIR / 'item_metadata.json'
+    if filtered_meta_file.exists():
+        with open(filtered_meta_file, 'r') as f:
+            filtered_metadata = json.load(f)
+        print(f"\nActual filtered items (from LLM_DIR): {len(filtered_metadata):,}")
+        print(f"Match: {'✅ YES' if abs(len(filtered_metadata) - both_valid) < 100 else '❌ NO'}")
+
+    print(f"\nReference (from LLM_DATA.md):")
+    print(f"  Expected after filtering: ~42,100")
+    print(f"  Our predicted: {both_valid:,}")
+    print(f"  Gap: {42100 - both_valid:+,}")
+
+else:
+    print("\n⚠️  Skipping - item_metadata not loaded")
+```
+
+### Fix 4: Correct Phase 3 - Use Filtered Sequences
+
+```python
+print("=" * 60)
+print("PHASE 3: CO-OCCURRENCE ANALYSIS")
+print("=" * 60)
+
+# Load FILTERED user sequences from LLM artifacts
+user_seq_file = LLM_DIR / 'user_sequences.json'
+
+if user_seq_file.exists():
+    print(f"\n[3.1] Loading filtered user sequences...")
+    print(f"Path: {user_seq_file}")
+
+    with open(user_seq_file, 'r') as f:
+        user_sequences = json.load(f)
+
+    # Convert string keys to int
+    user_sequences = {int(k): v for k, v in user_sequences.items()}
+
+    print(f"Loaded sequences for {len(user_sequences):,} users")
+
+    # Analyze sequence lengths
+    seq_lengths = [len(seq) for seq in user_sequences.values()]
+
+    print("\n[3.2] Sequence Length Distribution")
+    print("-" * 60)
+    print(f"Total sequences: {len(seq_lengths):,}")
+    print(f"Total interactions: {sum(seq_lengths):,}")
+    print(f"Average length: {np.mean(seq_lengths):.2f}")
+    print(f"Median length: {np.median(seq_lengths):.1f}")
+    print(f"Min length: {np.min(seq_lengths)}")
+    print(f"Max length: {np.max(seq_lengths)}")
+
+    print(f"\nPercentiles:")
+    for p in [25, 50, 75, 90, 95, 99]:
+        print(f"  p{p:2d}: {np.percentile(seq_lengths, p):.1f}")
+
+    print(f"\nComparison to reference (from LLM_DATA.md):")
+    print(f"  Reference users: 78,643")
+    print(f"  Our users: {len(user_sequences):,}")
+    print(f"  Reference avg seq: 6.5")
+    print(f"  Our avg seq: {np.mean(seq_lengths):.2f}")
+    print(f"  Status: {'✅ Good' if abs(np.mean(seq_lengths) - 6.5) < 1.0 else '⚠️ Different'}")
+
+else:
+    print(f"\n❌ user_sequences.json not found at {user_seq_file}")
+    print(f"   This file should be created by TIGER_SemanticID_LLM_finetune.ipynb Cell 9")
+```
+
+### Fix 5: Improve Phase 4 Summary
+
+```python
+print("=" * 60)
+print("PHASE 4: ROOT CAUSE SUMMARY & RECOMMENDATIONS")
+print("=" * 60)
+
+print("\n📊 FINDINGS SUMMARY\n")
+
+findings = []
+
+# Check raw data completeness
+if 'item_metadata' in locals() and item_metadata:
+    item_count = len(item_metadata)
+    if item_count < 100000:
+        findings.append({
+            'severity': '🔴 CRITICAL',
+            'issue': f'Raw dataset has only {item_count:,} items (expected ~137K)',
+            'impact': 'Missing ~{:,} items ({:.0f}% of dataset)'.format(
+                137269 - item_count,
+                100*(137269-item_count)/137269
+            ),
+            'recommendation': 'Re-download complete Amazon 2023 Video Games dataset and verify metadata extraction in TIGER_SemanticID_data_preparation.ipynb'
+        })
+    elif item_count < 130000:
+        findings.append({
+            'severity': '🟡 MODERATE',
+            'issue': f'Raw dataset has {item_count:,} items (expected ~137K)',
+            'impact': 'Some items missing but dataset is mostly complete',
+            'recommendation': 'Verify dataset download completeness and metadata parsing'
+        })
+
+# Check metadata quality
+if 'field_stats' in locals():
+    desc_coverage = field_stats['description']['count'] / len(item_metadata) if item_metadata else 0
+    if desc_coverage < 0.5:
+        findings.append({
+            'severity': '🟡 MODERATE',
+            'issue': f'Only {100*desc_coverage:.1f}% of items have descriptions',
+            'impact': 'Many items will fail filtering (need desc ≥100 chars)',
+            'recommendation': 'Check description extraction logic in load_meta_df() - may need to handle Amazon 2023 format differently'
+        })
+
+# Check sequence density
+if 'user_sequences' in locals():
+    avg_len = np.mean(seq_lengths)
+    if avg_len < 5.0:
+        findings.append({
+            'severity': '🟡 MODERATE',
+            'issue': f'Average sequence length is {avg_len:.2f} (expected ~6.5)',
+            'impact': 'Shorter sequences → fewer co-occurrence examples',
+            'recommendation': 'Review sequence filtering logic - may be too aggressive'
+        })
+
+# Check co-occurrence density if calculated
+if 'total_cooccurrences' in locals():
+    if total_cooccurrences < 1500000:
+        findings.append({
+            'severity': '🔴 CRITICAL',
+            'issue': f'Only {total_cooccurrences:,} co-occurrences (expected ~2.6M)',
+            'impact': 'Type E will generate far fewer examples than reference',
+            'recommendation': 'Verify exhaustive co-purchase mode is enabled and window size is correct'
+        })
+
+# Print findings
+if findings:
+    for i, finding in enumerate(findings, 1):
+        print(f"{i}. {finding['severity']} {finding['issue']}")
+        print(f"   Impact: {finding['impact']}")
+        print(f"   → {finding['recommendation']}")
+        print()
+else:
+    print("✅ No critical issues found!\n")
+    print("Note: This doesn't mean we match reference - just that data looks consistent.")
+
+# Final recommendations
+print("\n" + "=" * 60)
+print("RECOMMENDED ACTIONS (Priority Order)")
+print("=" * 60)
+
+print("\n1. ⭐ URGENT: Verify raw dataset source")
+print("   - Check that we downloaded the FULL Amazon 2023 Video Games metadata")
+print("   - URL: https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/")
+print("   - Expected size: ~137K items in meta_Video_Games.jsonl.gz")
+print("   - Current: {:,} items".format(len(item_metadata) if 'item_metadata' in locals() else 0))
+
+print("\n2. Check metadata extraction pipeline")
+print("   - Review TIGER_SemanticID_data_preparation.ipynb")
+print("   - Verify load_meta_df() handles Amazon 2023 format correctly")
+print("   - Check for parsing errors or row skipping")
+print("   - Ensure description list joining works properly")
+
+print("\n3. Verify filtering impact")
+print("   - Current: {:,} items pass filtering".format(both_valid if 'both_valid' in locals() else 0))
+print("   - Expected: ~42,100 items")
+print("   - If too aggressive, consider relaxing thresholds")
+
+print("\n4. Analyze co-occurrence generation")
+print("   - Ensure exhaustive mode is enabled in build_sid_dialogs.py")
+print("   - Check that copurchase_examples_per_item > copurchase_top_k")
+print("   - Verify window size and co-occurrence counting logic")
+
+print("\n" + "=" * 60)
+print("INVESTIGATION COMPLETE")
+print("=" * 60)
+```
+
+---
+
+## Summary of Changes Needed
+
+| Cell | Issue | Fix |
+|------|-------|-----|
+| Cell 3 | Hardcoded Colab paths | Add environment detection |
+| Cell 5 | Wrong file path | Use `RQVAE_DIR / 'item_metadata.json'` |
+| Cell 6 | Duplicate wrong path | Remove or fix to use correct location |
+| Cell 8-9 | Skipped analysis | Fix Phase 1 to enable Phase 2 |
+| Cell 11 | Wrong LLM_DIR path | Use filtered sequences from LLM_DIR |
+| Cell 12-13 | Skipped analysis | Fix Phase 3 to enable co-occurrence analysis |
+| Cell 15 | False positive | Add actual checks instead of empty results |
+
+---
+
+## Testing Checklist
+
+After applying fixes, verify:
+
+- [ ] Notebook detects Colab vs local environment correctly
+- [ ] Phase 1 loads item_metadata.json (80,840 items)
+- [ ] Phase 2 analyzes field coverage and filtering impact
+- [ ] Phase 3 loads user_sequences.json (101,409 users)
+- [ ] Phase 3 builds co-occurrence matrix
+- [ ] Phase 4 provides accurate root cause analysis
+- [ ] All paths resolve correctly in Colab environment
+- [ ] Clear error message if run locally
+
+---
+
+## Additional Recommendations
+
+1. **Rename the notebook** to make it clear it's Colab-only:
+   ```
+   investigate_llm_data.ipynb → investigate_llm_data_COLAB.ipynb
+   ```
+
+2. **Add documentation** at the top of the notebook:
+   ```markdown
+   # LLM Data Investigation (COLAB ONLY)
+
+   **IMPORTANT:** This notebook must be run in Google Colab with the
+   tiger_semantic_id artifacts stored in Google Drive.
+
+   **Prerequisites:**
+   1. Run TIGER_SemanticID_data_preparation.ipynb
+   2. Run TIGER_SemanticID.ipynb
+   3. Run TIGER_SemanticID_LLM_finetune.ipynb Cell 9 (filtering)
+
+   **Expected artifacts:**
+   - RQ-VAE artifacts: rq_vae_building/artifacts/
+   - LLM artifacts: llm_finetuning/
+   ```
+
+3. **Create a local-friendly version** that uses placeholder data or
+   expects artifacts to be downloaded separately.
+
+---
+
+## Files Referenced
+
+- `/Users/fox/Projects/CodexProjects/recsys_playground/notebooks/tiger_semantic_id/investigate_llm_data.ipynb`
+- `/Users/fox/Projects/CodexProjects/recsys_playground/notebooks/tiger_semantic_id/TIGER_SemanticID_data_preparation.ipynb`
+- `/Users/fox/Projects/CodexProjects/recsys_playground/notebooks/tiger_semantic_id/TIGER_SemanticID.ipynb`
+- `/Users/fox/Projects/CodexProjects/recsys_playground/notebooks/tiger_semantic_id/TIGER_SemanticID_LLM_finetune.ipynb`
+- `/Users/fox/Projects/CodexProjects/recsys_playground/tiger_semantic_id/LLM_DATA.md`
