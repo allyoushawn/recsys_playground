@@ -806,8 +806,9 @@ This is the standard VQ-VAE approach - decouples codebook learning from encoder 
 #### Phase 0: Raw Data Source and Download
 
 **Raw Data Source (Truly Unfiltered Amazon 2023):**
-- **URL:** `https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz`
+- **URL:** `https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz`
 - **Provider:** UCSD McAuley Lab - Amazon 2023 Dataset Repository
+- **Official Website:** https://amazon-reviews-2023.github.io/
 - **File:** `meta_Video_Games.jsonl.gz` (~50MB compressed)
 - **Format:** gzip-compressed JSONL (one JSON object per line)
 - **Expected count:** 137,269 products (truly unfiltered from source)
@@ -823,7 +824,7 @@ RAW_DATA_DIR = WORK_DIR / 'raw_data'
 ```python
 import urllib.request
 
-meta_url = 'https://datarepo.eng.ucsd.edu/mcauley_group/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz'
+meta_url = 'https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories/meta_Video_Games.jsonl.gz'
 meta_file = RAW_DATA_DIR / 'meta_Video_Games.jsonl.gz'
 
 # Skip download if file already exists (persistent storage in Google Drive)
