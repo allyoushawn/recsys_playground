@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, disable_progress_bar
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -174,6 +174,9 @@ def main():
     print(f"Input model: {args.in_model}")
     print(f"Output model: {args.out_model}")
 
+    # Disable tqdm progress bars to reduce notebook log spam
+    disable_progress_bar()
+
     # Load tokenizer and model
     print("\nLoading model...")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -247,6 +250,9 @@ def main():
         dataloader_num_workers=2,
         remove_unused_columns=False,
         report_to="none",
+        disable_tqdm=True,
+        log_level="warning",  # Only show warnings and errors
+        logging_first_step=False,  # Skip logging the first step
     )
 
     # Trainer
