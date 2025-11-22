@@ -781,6 +781,65 @@ This is the standard VQ-VAE approach - decouples codebook learning from encoder 
 5) Evaluate downstream performance: Seq2Seq vs LLM-based recommendation
 6) Add minimal tests and validate smoke‑test run in Colab
 
+## LLM Training Data Gap Analysis (2025-11-21)
+
+### Investigation Summary: 2.66M vs 4.2M Examples
+
+**Root Cause Identified:** User interaction filtering (min_user_interactions ≥ 5) in data_preparation.ipynb removes **91% of items** (137K → 12K), directly causing the training data gap.
+
+**Investigation Process:**
+- Phase 0: Downloaded raw Amazon 2023 Video Games metadata (137,269 items)
+- Phase 1: Compared raw vs filtered data - discovered 91% filtering rate
+- Phase 2: Analyzed metadata quality (title/description coverage)
+- Phase 3: Examined co-occurrence sparsity for Type E examples
+- Phase 4: Identified root cause and solutions
+
+**Filtering Chain:**
+```
+Raw Amazon 2023 data:           137,269 items (100%)
+  ↓ [user interaction filter: min_user_interactions ≥ 5]
+After user filter:               12,101 items (9%)   ← 91% LOSS
+  ↓ [title existence filter]
+After title filter:              ~12,000 items (minimal loss)
+  ↓ [LLM length filter: title ≥20, desc ≥100]
+Final LLM training data:         42,100 items (31% of raw)
+```
+
+**Impact on Training Examples:**
+
+| Type | Description | Current | Reference | Gap | Root Cause |
+|------|-------------|---------|-----------|-----|------------|
+| A | SID → Text | 283K | ~318K | -11% | Fewer items |
+| B | Text → SID | 364K | ~478K | -24% | Fewer items |
+| C | Next-item | 1,271K | ~1,400K | -9% | Shorter sequences |
+| D | Semantic | 60K | ~63K | -5% | Fewer items |
+| E | Co-purchase | 683K | 2,570K | -73% | Sparse interactions + fewer items |
+| **Total** | | **2,662K** | **4,200K** | **-37%** | 91% item filtering |
+
+**Solutions (Priority Order):**
+
+1. **🎯 PRIMARY (Recommended):** Reduce min_user_interactions threshold
+   - Change: `min_user_interactions = 5 → 3`
+   - Expected: ~50K items (4x increase) → ~10M+ examples
+   - Change: `min_user_interactions = 5 → 2`
+   - Expected: ~80K items (6.5x increase) → ~16M+ examples
+
+2. **🔄 ALTERNATIVE:** Use denser dataset (All_Beauty, Sports_and_Outdoors, Books)
+   - These categories have higher user-item interaction density
+   - Same filtering would retain more items
+
+3. **✅ ACCEPT:** 2.66M examples is substantial for modern LLM fine-tuning
+   - Quality > Quantity for domain-specific models
+   - Can fine-tune further with more data later
+
+4. **🔧 OPTIMIZE:** Improve metadata coverage
+   - Relax description length requirement (100 → 50 chars)
+   - Use features field as fallback for missing descriptions
+
+**Investigation Notebook:** `notebooks/tiger_semantic_id/investigate_llm_data.ipynb` (Colab-only, requires Drive artifacts)
+
+---
+
 ## LLM Fine-tuning Pipeline (Qwen3-8B for SID Recommendation)
 
 ### Overview

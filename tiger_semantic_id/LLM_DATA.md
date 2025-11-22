@@ -1,9 +1,17 @@
 # LLM Training Data Generation - Gap Analysis
 
+**⚠️ NOTE:** This analysis has been consolidated into `tiger_semantic_id/AGENTS.md` → "LLM Training Data Gap Analysis" section.
+
 **Goal:** Match reference implementation ([semantic-ids-llm](https://github.com/eugeneyan/semantic-ids-llm)) data generation exactly (~4.2M examples from Amazon 2023 Video Games dataset).
 
 **Date:** 2025-11-20
-**Status:** ❌ Generating only 2.66M examples (37% below target)
+**Status:** ✅ ROOT CAUSE IDENTIFIED - See AGENTS.md for details
+
+**Quick Summary:**
+- **Issue:** Generating only 2.66M examples (37% below target)
+- **Root Cause:** User interaction filter (min_user_interactions ≥ 5) removes 91% of items
+- **Solution:** Reduce threshold to 3 or 2 in data_preparation.ipynb
+- **Full Analysis:** See `AGENTS.md` → "LLM Training Data Gap Analysis"
 
 ---
 
