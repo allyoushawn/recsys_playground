@@ -291,112 +291,145 @@ def create_semantic_understanding_dialogs(
     return dialogs
 
 
-def build_cooccurrence_matrix(
-    user_sequences: dict[int, list[int]],
-    num_items: int,
-    window_size: int = 5,
-) -> dict[int, list[tuple[int, int]]]:
-    """Build item co-occurrence matrix from user sequences.
-
-    Args:
-        user_sequences: Dict mapping user_id -> list of item_ids
-        num_items: Total number of items
-        window_size: Consider items within this window as co-occurring
-
-    Returns:
-        Dict mapping item_id -> [(co_item_id, count), ...] sorted by count
-    """
-    from collections import defaultdict
-
-    cooccurrence = defaultdict(lambda: defaultdict(int))
-
-    for user_id, item_seq in tqdm(user_sequences.items(), desc="Building co-occurrence matrix"):
-        # For each item, count co-occurrences with nearby items
-        for i, item in enumerate(item_seq):
-            # Look at items within window
-            start = max(0, i - window_size)
-            end = min(len(item_seq), i + window_size + 1)
-
-            for j in range(start, end):
-                if i != j:
-                    other_item = item_seq[j]
-                    cooccurrence[item][other_item] += 1
-
-    # Convert to sorted lists
-    cooccurrence_sorted = {}
-    for item, co_items in cooccurrence.items():
-        # Sort by count descending
-        sorted_items = sorted(co_items.items(), key=lambda x: x[1], reverse=True)
-        cooccurrence_sorted[item] = sorted_items
-
-    return cooccurrence_sorted
-
-
 def create_copurchase_dialogs(
     semantic_ids: np.ndarray,
     user_sequences: dict[int, list[int]],
-    top_k: int = 10,
-    examples_per_item: int = 3,
+    item_metadata: dict[int, dict] | None = None,
+    window_size: int = 5,
 ) -> list[dict]:
-    """Create Type E dialogs: Co-purchase patterns.
+    """Create Type E dialogs: Co-purchase patterns and Category transitions.
+
+    Matches reference implementation 'generate_type_e_data_exhaustive':
+    1. Co-purchase patterns: Iterates through ALL user sequences and generates
+       forward/backward examples for every pair within window_size.
+    2. Category transitions: Learns common category transitions from sequences.
 
     Args:
         semantic_ids: Array of shape [num_items, 4]
         user_sequences: Dict mapping user_id -> list of item_ids
-        top_k: Consider top K co-purchased items (set to -1 for exhaustive mode)
-        examples_per_item: Number of examples to generate per item (if > top_k, uses exhaustive mode)
+        item_metadata: Dict mapping item_id -> metadata (required for titles/categories)
+        window_size: Window size for co-occurrence (default: 5)
 
     Returns:
         List of dialog dicts
-
-    Note:
-        Reference implementation uses exhaustive mode, generating examples for ALL co-occurring
-        pairs within the window. To match reference, use exhaustive mode by setting:
-        - examples_per_item > top_k (e.g., examples_per_item=30, top_k=10)
-        - OR top_k=-1 (explicitly request exhaustive mode)
     """
     dialogs = []
-    num_items = len(semantic_ids)
+    
+    # We need metadata for titles and categories
+    # If not provided, we can't generate rich examples with titles/categories
+    if item_metadata is None:
+        print("Warning: item_metadata not provided for Type E. Generating simplified examples.")
+        
+    # Create lookup for efficiency
+    # semantic_id -> {title, category}
+    # We use item_id as the key for semantic_ids array
+    item_info = {}
+    for item_id, meta in item_metadata.items() if item_metadata else {}:
+        if 0 <= item_id < len(semantic_ids):
+            item_info[item_id] = {
+                "title": meta.get("title", ""),
+                "category": meta.get("category_leaf", "") or meta.get("category", ""),
+            }
 
-    # Build co-occurrence matrix
-    cooccurrence = build_cooccurrence_matrix(user_sequences, num_items)
-
-    # Generate dialogs
-    for item_id in tqdm(range(num_items), desc="Building co-purchase dialogs"):
-        if item_id not in cooccurrence:
+    print(f"Generating co-purchase patterns from {len(user_sequences):,} sequences...")
+    
+    # Pattern 1: Co-purchase patterns from sequences (Instance-based)
+    copurchase_count = 0
+    
+    for user_id, seq in tqdm(user_sequences.items(), desc="Processing sequences"):
+        if len(seq) < 2:
             continue
+            
+        # For every pair in the sequence within window
+        for i in range(len(seq) - 1):
+            # Look ahead up to window_size items
+            for j in range(i + 1, min(i + window_size + 1, len(seq))):
+                item1_id = seq[i]
+                item2_id = seq[j]
+                
+                # Skip if invalid IDs
+                if item1_id >= len(semantic_ids) or item2_id >= len(semantic_ids):
+                    continue
+                    
+                sid1_str = format_sid_tokens(semantic_ids[item1_id])
+                sid2_str = format_sid_tokens(semantic_ids[item2_id])
+                
+                # Get titles if available
+                title1 = item_info.get(item1_id, {}).get("title", "")
+                title2 = item_info.get(item2_id, {}).get("title", "")
+                
+                # Forward direction
+                # "A user who bought {item1} ({title1}) might also buy:"
+                instruction_fwd = f"Users who bought {sid1_str}"
+                if title1:
+                    instruction_fwd += f" ({title1})"
+                instruction_fwd += " also frequently bought:"
+                
+                dialogs.append({
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": instruction_fwd},
+                        {"role": "assistant", "content": sid2_str},
+                    ],
+                    "type": "copurchase_forward",
+                })
+                
+                # Backward direction
+                # "Before buying {item2} ({title2}), users often buy:"
+                instruction_bwd = f"Before buying {sid2_str}"
+                if title2:
+                    instruction_bwd += f" ({title2})"
+                instruction_bwd += ", users often buy:"
+                
+                dialogs.append({
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": instruction_bwd},
+                        {"role": "assistant", "content": sid1_str},
+                    ],
+                    "type": "copurchase_backward",
+                })
+                
+                copurchase_count += 2
 
-        sid = semantic_ids[item_id]
-        sid_str = format_sid_tokens(sid)
+    print(f"Generated {copurchase_count:,} co-purchase examples")
 
-        # Get co-purchased items (exhaustive if examples_per_item > top_k or top_k == -1)
-        if examples_per_item > top_k or top_k == -1:
-            # Exhaustive mode: use ALL co-occurring items (matches reference implementation)
-            co_items = cooccurrence[item_id]
-        else:
-            # Limited mode: use only top K
-            co_items = cooccurrence[item_id][:top_k]
-
-        # Generate examples up to examples_per_item
-        num_examples = min(examples_per_item, len(co_items))
-        for i in range(num_examples):
-            if i >= len(co_items):
-                break
-
-            co_item_id, count = co_items[i]
-            co_sid = semantic_ids[co_item_id]
-            co_sid_str = format_sid_tokens(co_sid)
-
-            dialog = {
+    # Pattern 2: Category transition patterns
+    print("Generating category transition patterns...")
+    from collections import Counter
+    category_transitions = []
+    
+    for seq in user_sequences.values():
+        # Get categories for each item in sequence
+        categories = []
+        for item_id in seq:
+            cat = item_info.get(item_id, {}).get("category", "")
+            if cat:
+                categories.append(cat)
+        
+        # Record all transitions
+        for i in range(len(categories) - 1):
+            category_transitions.append((categories[i], categories[i + 1]))
+            
+    # Count transitions
+    transition_counts = Counter(category_transitions)
+    
+    # Generate patterns for common transitions
+    cat_trans_count = 0
+    for (cat1, cat2), count in transition_counts.items():
+        if count >= 5:  # Common transitions threshold from reference
+            dialogs.append({
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Users who bought {sid_str} also frequently bought:"},
-                    {"role": "assistant", "content": co_sid_str},
+                    {"role": "user", "content": f"After buying from {cat1}, users often buy from:"},
+                    {"role": "assistant", "content": cat2},
                 ],
-                "type": "copurchase",
-            }
-            dialogs.append(dialog)
-
+                "type": "category_transition",
+            })
+            cat_trans_count += 1
+            
+    print(f"Generated {cat_trans_count:,} category transition examples")
+    
     return dialogs
 
 
@@ -673,15 +706,31 @@ def main():
         print(f"  Generated {len(type_d_dialogs):,} examples")
 
     if "E" in data_types:
-        print(f"\n[Type E] Co-Purchase Patterns (top_k={args.copurchase_top_k}, examples_per_item={args.copurchase_examples_per_item})")
+        print(f"\n[Type E] Co-Purchase Patterns & Category Transitions (Exhaustive)")
+        # Ensure metadata is loaded for Type E (titles/categories)
+        if item_metadata is None and args.metadata_path:
+             # Load if not already loaded for A/B
+            print(f"Loading item metadata for Type E from {args.metadata_path}...")
+            with open(args.metadata_path) as f:
+                item_metadata = json.load(f)
+            item_metadata = {
+                int(k) if isinstance(k, str) else k: v
+                for k, v in item_metadata.items()
+            }
+
         type_e_dialogs = create_copurchase_dialogs(
             semantic_ids,
             user_sequences,
-            top_k=args.copurchase_top_k,
-            examples_per_item=args.copurchase_examples_per_item,
+            item_metadata=item_metadata,
         )
         all_dialogs.extend(type_e_dialogs)
-        type_stats["E_copurchase"] = len(type_e_dialogs)
+        
+        # Count subtypes
+        for subtype in ["copurchase_forward", "copurchase_backward", "category_transition"]:
+            count = sum(1 for d in type_e_dialogs if d.get("type") == subtype)
+            if count > 0:
+                type_stats[f"E_{subtype}"] = count
+                
         print(f"  Generated {len(type_e_dialogs):,} examples")
 
     print("\n" + "="*60)
