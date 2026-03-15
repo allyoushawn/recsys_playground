@@ -56,6 +56,14 @@
 
 **Goal:** R² > 0.05 AND MAE < 0.85 — **NOT MET** after 13 experiments across 5 rounds.
 
+### Metrics used in RTM optimization
+
+- **σ_ratio** = std(predictions) / std(true ratings). Target 1.0. &lt; 1 means predictions are compressed toward the mean (regression to the mean); the model does not spread outputs enough to match the true rating variance.
+- **Cal.Slope** = slope of the line when regressing actual ratings on predictions (predicted vs actual). Target 1.0. &lt; 1 means under-spread: low predictions are not low enough, high not high enough; &gt; 1 would mean overconfident spread.
+- **Per-rating buckets:** For each true rating (1–5), we computed count, mean prediction, std of predictions, and MAE. This shows whether the model outputs similar values regardless of true rating (mean collapse).
+
+Diagnostic also included: calibration scatter (predicted vs actual, y=x line, fit slope), residual plot (residual vs predicted), and prediction vs true histograms.
+
 ### Diagnostic (Round 1)
 
 | Metric | Value |
@@ -65,7 +73,29 @@
 | σ_ratio | 0.675 (target 1.0) |
 | Cal. slope | 0.424 (target 1.0) |
 
-Per-rating bucket: True 1s predicted ~3.8, true 5s predicted ~4.5. Severe compression toward the mean.
+Per-rating bucket: True 1s predicted ~3.8, true 5s predicted ~4.5. Severe compression toward the mean — the model barely distinguishes low vs high ratings.
+
+### What each RTM round tested (interventions)
+
+- **Round 2 — Breaking mean collapse:**  
+  **P** Variance-preserving loss (Huber + λ|σ_y − σ_pred|): increased σ_ratio (0.79) but **worsened R²** (-0.21); optimizing spread directly hurt accuracy.  
+  **Q** Embedding noise N(0, 0.1) during training: no real gain.  
+  **R** Z-score targets + unbounded output + Huber(δ=0.5): best R² in round 2 (-0.059), no sigmoid compression.
+
+- **Round 3 — Alternative framings:**  
+  **S** 5-class cross-entropy + low-temperature softmax (τ=0.5) at inference, expectation as prediction: **best MAE overall (0.853)**; classification avoids mean-seeking bias of regression.  
+  **T** Ordinal regression (CORAL-style cumulative logits): strong R² (-0.047), good calibration.  
+  **U** Focal-style 2× weight on ratings 1 and 5: slightly better σ_ratio but worse R² (-0.17); up-weighting tails did not fix collapse.
+
+- **Round 4 — Addressing sparsity:**  
+  **V** SVD-initialized embeddings + residual from item mean: **hurt** (MAE 0.95, R² -0.14); SVD on this sparse matrix did not help.  
+  **W** Learnable temperature sigmoid 1+4·σ(x/τ): small gain.  
+  **X** Heteroscedastic NLL (predict μ and log σ): **best R² (-0.033)**; learning uncertainty discouraged mean collapse without forcing spread artificially.
+
+- **Round 5 — Refinements:**  
+  **Y** Ordinal + SVD init: **worst R² (-0.32)**; SVD + ordinal combined badly.  
+  **Z** Z-score + 60 epochs + lower LR (3e-4): strong (R² -0.049, MAE 0.868).  
+  **AA** 5-class CE + τ=0.3 (sharper): good MAE (0.854), worse R² than S.
 
 ### RTM Leaderboard (sorted by R² desc)
 
@@ -88,12 +118,22 @@ Per-rating bucket: True 1s predicted ~3.8, true 5s predicted ~4.5. Severe compre
 ### RTM Investigation — What we learned
 
 1. **Mean collapse is fundamental, not fixable by loss/architecture alone.** With ~2.4 interactions/user, user embeddings are virtually untrained. The model learns item popularity bias + global mean, not individual preferences.
+
 2. **Heteroscedastic NLL (X) achieved the best R² (-0.033)** by forcing the model to learn uncertainty, indirectly discouraging mean collapse. Still negative R², but closest to zero.
-3. **Classification framing (S, AA) achieved the best MAE (0.853)** — CE loss doesn't have the mean-seeking bias of regression losses. But R² worsened because the model commits to modes rather than calibrated predictions.
+
+3. **Classification framing (S, AA) achieved the best MAE (0.853)** — CE loss doesn't have the mean-seeking bias of regression losses. Low-temperature softmax (τ=0.5) at inference makes the model commit to a rating rather than hedging. R² is worse because the model predicts modes, not calibrated continuous values.
+
 4. **R² and MAE are in tension.** Experiments that improve R² (less mean collapse) tend to hurt MAE, and vice versa. The Pareto front is: S (best MAE, 0.853) vs X (best R², -0.033).
-5. **SVD initialization hurt performance** (V, Y). The sparse interaction matrix doesn't provide meaningful SVD factors at this sparsity level.
-6. **σ_ratio remained 0.64–0.84 across all experiments** (target: 1.0). Even the most aggressive interventions only partially addressed mean collapse.
-7. **Calibration slope stayed below 0.47** everywhere. The model fundamentally cannot rank users' preferences from IDs alone at this sparsity.
+
+5. **Variance-preserving loss (P) backfired:** it raised σ_ratio (0.79) but worsened R² (-0.21). Directly penalizing low prediction spread distorted the loss and hurt accuracy.
+
+6. **SVD initialization hurt performance** (V, Y). The sparse interaction matrix doesn't provide meaningful SVD factors at this sparsity level; Ordinal+SVD (Y) was the worst experiment (R² -0.32).
+
+7. **Z-score + unbounded output (R, Z)** helped R² without forcing spread artificially; Z with longer training (60 ep) and lower LR was among the best (R² -0.049).
+
+8. **σ_ratio remained 0.64–0.84 across all experiments** (target: 1.0). Even the most aggressive interventions only partially addressed mean collapse.
+
+9. **Calibration slope stayed below 0.47** everywhere. The model fundamentally cannot rank users' preferences from IDs alone at this sparsity.
 
 ### Bug fixes during investigation
 
