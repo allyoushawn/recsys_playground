@@ -102,14 +102,59 @@ Repeat for up to `max_rounds`:
 - **Shared utilities cell**: If the round introduces new model classes,
   loss functions, or dataset classes, add them to the shared definitions
   cell (or create one if it doesn't exist). Update in-place.
-- **Round cell**: Add a new code cell for this round. The cell must:
+- **Round cell**: Add a new code cell for this round. The cell **must**
+  use the early-exit guard (see pattern below) so that papermill skips
+  it on later runs once results are cached. Inside the guard:
   - Run all K experiments sequentially.
   - For each experiment: print experiment name, train, evaluate, print
     metrics and wall-clock time.
   - End with a summary table comparing all experiments in the round.
   - Include `time.time()` timing per experiment.
+  - Save results dict to the cache file at the end.
 
-Example round cell output format:
+##### Early-exit guard pattern
+
+Every round cell must follow this structure:
+
+```python
+import json, os
+_ROUND_N_CACHE = os.path.join(CACHE_DIR, 'round_N_results.json')
+
+if not os.path.exists(_ROUND_N_CACHE):
+    # ===================== ROUND N =====================
+
+    results = {}
+
+    # --- Experiment X ---
+    ...
+    results['X'] = {'Hit@50': ..., 'MRR@50': ..., 'NDCG@50': ...}
+
+    # --- Experiment Y ---
+    ...
+    results['Y'] = {'Hit@50': ..., 'MRR@50': ..., 'NDCG@50': ...}
+
+    # Save cache
+    with open(_ROUND_N_CACHE, 'w') as f:
+        json.dump(results, f)
+
+    # Print round summary
+    ...
+
+else:
+    with open(_ROUND_N_CACHE) as f:
+        results = json.load(f)
+    print(f'ROUND N: SKIPPED (cached)')
+    for name, m in results.items():
+        print(f"  {name}: Hit@50={m['Hit@50']:.4f}")
+```
+
+`CACHE_DIR` is defined once in the setup cells (see Notebook Convention).
+Replace `N` with the round number and `X`, `Y` with experiment letters.
+
+The cache file persists on Drive so even Colab runtime restarts won't
+re-run old experiments. To force a re-run, delete the cache file.
+
+Example round cell output (first run):
 ```
 ============================================================
 EXPERIMENT D: MLP + BPR + Multi-Neg (K=5)
@@ -126,6 +171,14 @@ Experiment                       Hit@50   MRR@50  NDCG@50
 D: MultiNeg(K=5)                 0.1460   0.0271   0.0509
 E: PopNeg                        0.0240   0.0024   0.0066
 F: Large+CosineLR                0.1360   0.0240   0.0460
+```
+
+Example round cell output (subsequent runs — cached):
+```
+ROUND 2: SKIPPED (cached)
+  D: Hit@50=0.1460
+  E: Hit@50=0.0240
+  F: Hit@50=0.1360
 ```
 
 #### Step 4 — GPU Review
@@ -181,15 +234,25 @@ Print two things:
 ## Notebook Convention
 
 - **Cells 0–K**: Data loading, preprocessing, config. Untouched across rounds.
+  One of these cells must define `CACHE_DIR` and create it:
+  ```python
+  import os
+  CACHE_DIR = '/content/drive/MyDrive/colab/data/experiment_cache'
+  os.makedirs(CACHE_DIR, exist_ok=True)
+  ```
+  If the notebook doesn't have this yet, add it to the config cell in
+  Phase 0 before the first round.
 - **Cell K+1**: Shared utilities (model classes, loss functions, dataset
   classes, eval function, training loop). Updated in-place when new
   components are needed.
-- **Cell K+2**: Round 1 experiments (appended by this skill).
-- **Cell K+3**: Round 2 experiments (appended by this skill).
+- **Cell K+2**: Round 1 experiments (with early-exit guard).
+- **Cell K+3**: Round 2 experiments (with early-exit guard).
 - ...and so on.
 
 Each round cell is self-contained — it can reference models/functions from
-the shared utilities cell but defines its own experiment logic.
+the shared utilities cell but defines its own experiment logic. Every round
+cell is wrapped in an early-exit guard so only the newest round trains;
+older rounds load cached results and skip in seconds.
 
 ## Experiment Naming
 
@@ -210,3 +273,6 @@ This makes the overall leaderboard easy to read.
 | No goal metric specified | Ask: "What metric should I optimize and what's the target?" |
 | Notebook has no results yet | Run baseline in Phase 0 first |
 | All K experiments regress | Note regression in analysis, try fundamentally different approaches next round |
+| Shared utilities cell changed (new model class) | Delete cache files for affected rounds so they re-run with updated code |
+| User wants to re-run a cached round | Delete the specific `round_N_results.json` from `CACHE_DIR` |
+| Round cell crashes mid-way (partial cache) | No cache file is written (it's saved at the end); re-run will retry from scratch |
