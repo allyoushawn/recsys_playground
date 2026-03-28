@@ -140,8 +140,39 @@ Per-rating bucket: True 1s predicted ~3.8, true 5s predicted ~4.5. Severe compre
 - **cal_slope computation:** Fixed `np.polyfit(preds, y_true, 1)[1]` → `[0]` — was reporting intercept instead of slope in experiment cells.
 - **Variable shadowing:** Fixed `mu, log_sigma = model_x(...)` in heteroscedastic training loop overwriting the global `mu` scalar.
 
+## DCN v2 + PLE-MTL (5 rounds, Colab T4)
+
+Notebook: [`notebooks/ad_hoc/experiment_dcn_ple_rtm.ipynb`](../notebooks/ad_hoc/experiment_dcn_ple_rtm.ipynb). Dataset: Amazon Video Games 200k, same split/features as prior RTM work. **Dual goal R² > 0.05 AND MAE < 0.85 — not met.**
+
+### Overall leaderboard (test MAE, all rounds A–M)
+
+| Rank | Experiment | MAE | R² | σ_ratio | Round |
+|------|------------|-----|-----|---------|-------|
+| 1 | **J: PLE mask y=1/5 + router** | **0.871** | -0.469 | 0.847 | 4 |
+| 2 | H: PLE + router, 50ep, lr=5e-4 | 0.896 | -0.191 | 0.759 | 4 |
+| 3 | C: PLE + router | 0.898 | -0.188 | 0.752 | 1 |
+| 4 | L: PLE wide + router | 0.902 | -0.185 | 0.755 | 5 |
+| 5 | M: PLE-DCN + router | 0.906 | -0.214 | 0.781 | 5 |
+| … | (see notebook / `round_*_results.json` on Drive) | | | | |
+
+### What changed vs Round 1-only baseline
+
+- **Best MAE** improved from **0.898 (C)** to **0.871 (J)** (~3% relative), by training low/high heads **only on ratings 1 and 5** plus the same 3-class router.
+- **J trades calibration badly:** R² **-0.47** (worst in this sweep) — higher σ_ratio but poor agreement with the global rating scale; use J only if MAE is the sole objective.
+- **Patient PLE + router (H)** and **wider PLE + router (L)** sit in the **0.896–0.902 MAE** band with R² still ~**-0.19** (similar to C).
+- **DCN depth / PLE-DCN / percentile tweaks (D, E, F, G, K)** did not beat **C** on MAE; **G** (PLE-DCN + percentile) was weakest MAE in the table (~0.948).
+
+### Next iteration ideas (if continuing this notebook)
+
+- Early-stop **J**-style models on **validation R²** or a composite score to avoid the MAE/R² collapse.
+- Match prior **S** (5-class CE + τ): add a round that compares CE head vs PLE-router under the same features.
+- Router **class definition** aligned with **J**’s masks (oracle mismatch may hurt): e.g. class 0 = rating 1 only vs 1–2.
+
+---
+
 ## Next steps to explore
 
+- **DCN v2 + PLE-MTL:** notebook above; caches under `CACHE_DIR` on Drive for re-runs.
 - Text features from reviews (pretrained language model encodings) — likely the only path to R² > 0 at this sparsity
 - Temporal features (timestamp, recency)
 - Non-DL baselines (SVD, gradient-boosted trees) as a ceiling check
