@@ -32,3 +32,4 @@ YAML matching **CODE_CHANGE_OUTPUT** in `.cursor/skills/subagent-iterative-exper
 
 - Do not run training/eval locally unless lead asks for smoke test.
 - Do not apply papermill/device preflight fixes here — runtime owns execution-safe preflight.
+- Do NOT sync files to Colab (no git push, no scp). Your job is local edits only. The runtime subagent handles scp to Colab.

@@ -59,23 +59,44 @@ flowchart LR
   F --> G[scribe]
 ```
 
-1. **Analyzer** (if cadence says so): invoke `/experiment-analyzer` with handoff per [contracts.md](contracts.md). Append `analyzer_pack` for planner.
-2. **Planner**: `/experiment-planner` — K hypotheses, `strategies.md` order, diversity.
-3. **Critic**: `/experiment-plan-critic` — accept/reject, budget 30m, set `execution_route` and `needs_replan`.
-4. If `needs_replan`: increment `critic_replan_streak`; if streak **≥ 3**, escalate; on auto-unblock without user, **stop** and scribe (see policies). Else planner again (same round number).
-5. **Code-change**: if `execution_route == code_change_then_runtime`, invoke `/experiment-code-change`. If `runtime_only`, skip.
-6. **Runtime**: `/experiment-runtime` — follow run-notebook-on-colab Phase 3; preflight = execution-safe + GPU **Critical** only (see policies).
-7. **Scribe**: `/experiment-scribe` — append trail, leaderboard rows with **comparability** tags, evidence-only observations.
-8. Update `run_state`, check goal / max rounds, continue or final summary.
+Each numbered step below MUST be a **Task tool call** to the named subagent. Do NOT do the work inline.
+
+1. **Analyzer** (if cadence says so): **delegate to `/experiment-analyzer`** with handoff per [contracts.md](contracts.md). Append `analyzer_pack` for planner.
+2. **Planner**: **delegate to `/experiment-planner`** — K hypotheses, `strategies.md` order, diversity.
+3. **Critic**: **delegate to `/experiment-plan-critic`** — accept/reject, budget 30m, set `execution_route` and `needs_replan`.
+4. If `needs_replan`: increment `critic_replan_streak`; if streak **≥ 3**, escalate; on auto-unblock without user, **stop** and scribe (see policies). Else delegate to planner again (same round number).
+5. **Code-change**: if `execution_route == code_change_then_runtime`, **delegate to `/experiment-code-change`**. If `runtime_only`, skip.
+6. **Runtime**: **delegate to `/experiment-runtime`** — uses scp + papermill (NEVER git push); preflight = execution-safe + GPU **Critical** only (see policies).
+7. **Scribe**: **delegate to `/experiment-scribe`** — append trail, leaderboard rows with **comparability** tags, evidence-only observations.
+8. Lead updates `run_state`, checks goal / max rounds, continues or prints final summary. This is the ONLY step the lead does itself.
 
 ## Routing rules
 
 - **`execution_route`**: `code_change_then_runtime` if any accepted hypothesis has `requires_code_change: true`; else `runtime_only`. Critic must not rewrite per-hypothesis flags.
 - **Failures**: If runtime returns `failure_is_execution_safe: false` for OOM/TIMEOUT/CODE (semantic), lead surfaces options; then [auto-unblock](policies.md#auto-unblock-policy) may route to code-change for **operational downgrade** only. Never auto-apply **scientific** changes.
 
-## Subagent invocation
+## Subagent invocation (MANDATORY)
 
-Use explicit subagent names (e.g. `/experiment-planner`) or natural language. **Always** paste a **Handoff block** (see contracts.md) — subagents have no chat history.
+**You MUST delegate specialist work to subagents using the Task tool.** Do NOT perform planner/critic/code-change/runtime/scribe/analyzer work inline in the lead conversation. Each step in the per-round flow MUST be a Task tool call to the corresponding `experiment-*` subagent.
+
+How to invoke: use the Task tool with `subagent_type` set to the appropriate type, or invoke by name (e.g. `/experiment-planner`). **Always** paste a **Handoff block** (see contracts.md) in the task prompt — subagents have no chat history.
+
+The lead's job is to **orchestrate and route**, not to propose hypotheses, review proposals, edit notebooks, execute on Colab, write trail logs, or analyze history. If you find yourself doing any of those directly, stop and delegate to the correct subagent instead.
+
+## File sync: scp only, NEVER git
+
+**CRITICAL:** To sync notebooks to Colab, use `scp` per [run-notebook-on-colab/SKILL.md](../run-notebook-on-colab/SKILL.md). **NEVER** use `git add`, `git commit`, `git push`, or any git-based workflow to transfer files to the Colab runtime. The Colab environment reads from Drive, and `scp` writes directly there over SSH. Git round-trips are slow, unnecessary, and break the workflow.
+
+```bash
+sshpass -p "cursorssh" scp <SSH_OPTS> \
+  <LOCAL_NOTEBOOK_PATH> \
+  root@<HOSTNAME>:/content/drive/MyDrive/colab/recsys_playground/recsys_playground/<NOTEBOOK_PATH>
+```
+
+This applies to:
+- experiment-runtime (preflight fixes then scp)
+- experiment-code-change edits (lead or runtime scps the result)
+- Any retry/re-run cycle (re-scp, not git push)
 
 ## Validation checklist
 

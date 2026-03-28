@@ -1,0 +1,24 @@
+---
+description: Enforces scp-based Colab sync (never git push) and mandatory subagent delegation for the iterative experiment workflow
+globs:
+alwaysApply: true
+---
+
+# Colab file sync: scp only
+
+When transferring notebooks or files to a Google Colab runtime, ALWAYS use `scp` via SSH as defined in `.cursor/skills/run-notebook-on-colab/SKILL.md`.
+
+NEVER use `git add`, `git commit`, `git push`, or any git-based workflow to sync files to Colab. The Colab environment reads from Google Drive, and `scp` writes directly there over the SSH tunnel. Git round-trips are slow, create unnecessary commits, and break the established workflow.
+
+# Subagent delegation is mandatory
+
+When executing the `subagent-iterative-experiment` skill workflow, the lead agent MUST delegate specialist work to the corresponding `experiment-*` subagent using the Task tool. The lead must NOT:
+
+- Propose hypotheses (that is experiment-planner)
+- Review/accept/reject proposals (that is experiment-plan-critic)
+- Edit notebook code (that is experiment-code-change)
+- Execute notebooks on Colab (that is experiment-runtime)
+- Write trail logs or leaderboard entries (that is experiment-scribe)
+- Analyze experiment history (that is experiment-analyzer)
+
+The lead's role is strictly: orchestrate, route, manage run_state, and escalate to the user when needed.
