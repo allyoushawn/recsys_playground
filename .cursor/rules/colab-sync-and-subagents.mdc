@@ -1,24 +1,50 @@
 ---
-description: Enforces scp-based Colab sync (never git push) and mandatory subagent delegation for the iterative experiment workflow
+description: Strict enforcement for /subagent-iterative-experiment — mandatory subagent delegation via Task tool and scp-only Colab sync
 globs:
 alwaysApply: true
 ---
 
-# Colab file sync: scp only
+# Strict rules for /subagent-iterative-experiment
 
-When transferring notebooks or files to a Google Colab runtime, ALWAYS use `scp` via SSH as defined in `.cursor/skills/run-notebook-on-colab/SKILL.md`.
+These rules apply whenever the lead agent is running the `subagent-iterative-experiment` skill or any "iterative experiment" run that targets Google Colab.
 
-NEVER use `git add`, `git commit`, `git push`, or any git-based workflow to sync files to Colab. The Colab environment reads from Google Drive, and `scp` writes directly there over the SSH tunnel. Git round-trips are slow, create unnecessary commits, and break the established workflow.
+## 1. Mandatory subagent delegation via Task tool
 
-# Subagent delegation is mandatory
+The lead agent MUST invoke the following subagents via the **Task tool**. There is no inline equivalent — the lead must NOT perform any of this work itself.
 
-When executing the `subagent-iterative-experiment` skill workflow, the lead agent MUST delegate specialist work to the corresponding `experiment-*` subagent using the Task tool. The lead must NOT:
+| Step | Subagent | What it owns | Lead does this inline? |
+|------|----------|-------------|----------------------|
+| Analyze | `experiment-analyzer` | Synthesize history, surface blind spots | **NO — Task tool** |
+| Plan | `experiment-planner` | Propose hypotheses | **NO — Task tool** |
+| Critique | `experiment-plan-critic` | Accept/reject, set execution_route | **NO — Task tool** |
+| Code change | `experiment-code-change` | Edit notebook (scientific / operational downgrade) | **NO — Task tool** |
+| Execute | `experiment-runtime` | scp + papermill on Colab, classify failures | **NO — Task tool** |
+| Record | `experiment-scribe` | Append trail log, update leaderboard | **NO — Task tool** |
 
-- Propose hypotheses (that is experiment-planner)
-- Review/accept/reject proposals (that is experiment-plan-critic)
-- Edit notebook code (that is experiment-code-change)
-- Execute notebooks on Colab (that is experiment-runtime)
-- Write trail logs or leaderboard entries (that is experiment-scribe)
-- Analyze experiment history (that is experiment-analyzer)
+The lead's ONLY jobs are: orchestrate the sequence, manage `run_state`, route based on `execution_route` and failure class, apply auto-unblock policy, and escalate to the user.
 
-The lead's role is strictly: orchestrate, route, manage run_state, and escalate to the user when needed.
+If you catch yourself writing code to do any subagent's job directly in the lead conversation, **stop and delegate via Task tool instead**.
+
+## 2. experiment-runtime is mandatory for every Colab execution
+
+Every notebook execution on Colab MUST go through the `experiment-runtime` subagent. The lead must NOT run scp, ssh, or papermill commands directly. The runtime subagent owns the full execution lifecycle:
+
+1. Preflight fixes (Critical GPU issues, papermill compatibility)
+2. `scp` notebook to Colab
+3. `papermill` execution via SSH
+4. Monitor, classify failures, retry (execution-safe only)
+
+There is no shortcut. Even for re-runs or retries after code-change edits, the lead delegates to `experiment-runtime`.
+
+## 3. File sync: scp only, NEVER git
+
+To transfer notebooks or files to a Google Colab runtime, the ONLY permitted method is `scp` via SSH as defined in `.cursor/skills/run-notebook-on-colab/SKILL.md`.
+
+**NEVER** use any of the following to sync files to Colab:
+- `git add` / `git commit` / `git push`
+- `git pull` on the Colab side
+- Any git-based workflow
+
+Why: The Colab environment reads from Google Drive. `scp` writes directly there over the SSH tunnel. Git round-trips are slow, create unnecessary commits, pollute history, and break the established workflow.
+
+This applies to all agents and all stages — preflight, execution, retry, re-run.
