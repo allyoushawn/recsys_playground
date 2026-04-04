@@ -42,7 +42,7 @@ Resolve short notebook names by searching `notebooks/`.
 ## Phase 0 — Lead setup
 
 1. Read notebook; summarize baseline (model, loss, data, current metrics if any).
-2. Derive **`scribe_doc_path`** per [policies.md](policies.md): `experiments/logs/YYYYMMDD_<notebook_stem>_trail.md`. Create `experiments/logs/` if needed.
+2. Derive **`scribe_doc_path`** per [policies.md](policies.md): `experiments/logs/YYYYMMDD_<notebook_stem>_trial.md`. Create `experiments/logs/` if needed.
 3. Establish Colab SSH (run-notebook-on-colab Phase 2); store `hostname`.
 4. Initialize `run_state`: `best_*`, `critic_replan_streak: 0`, `last_analyzer_round: null`, round `1`.
 
