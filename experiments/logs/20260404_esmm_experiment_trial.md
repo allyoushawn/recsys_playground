@@ -7,6 +7,7 @@
 | **Date started** | 2026-04-04 |
 | **Last updated** | 2026-04-05 |
 | **Canonical copy** | Same history is also summarized in the **final markdown cell** of the notebook (see `notebook-conventions.md`). This file is the repo-side trial log. |
+| **Throughput sub-study** | Merged here from the former `20260405_20260404_esmm_experiment_trial.md`; goal `samples_per_sec > 45000` on capped K′ legs. **Default training (Round 4 K)** matches R2-optimized: fused ESMM, manual batches, AMP + prefetch on CUDA, batch 4096. |
 
 **Execution policy (Cursor / Colab):** Sync the notebook with **`scp` + `papermill`** only — **do not** rely on `git push` to Colab. The notebook defaults to **`SKIP_GIT_REPO_SYNC = True`** so `git reset --hard` does not replace the synced file. See `.cursor/skills/run-notebook-on-colab/SKILL.md` and `compatibility.md` §5.
 
@@ -24,6 +25,80 @@
 | 6 | D | 2 | 0.5255 | 0.5084 | 2169 | canonical |
 
 **Current best: K — CVR_AUC 0.6158 (goal not achieved)**
+
+---
+
+## Throughput study (2026-04-05)
+
+Sub-study on the same notebook; logs consolidated from the former dated throughput-only file.
+
+**Goal:** `samples_per_sec > 45000` (where measured on K′ legs with `max_wall_seconds` cap).
+
+### Throughput leaderboard (samples/s)
+
+| experiment | samples_per_sec | wall_clock_s | comparability | notes |
+|------------|-----------------|--------------|-----------------|--------|
+| K_prime_baseline | 35604 | 902 | canonical | amp=False, prefetch=False |
+| K_prime_throughput | 35487 | 900 | canonical | amp=True, prefetch=True; cuda peak ~0.81 GiB (~869730877 B) |
+| K_prime_r2_baseline | 33133 | 902 | canonical | batch 4096, DataLoader, amp=False, prefetch=False, manual=False |
+| K_prime_r2_optimized | 78415 | 901 | canonical | batch 4096, manual=True, amp=True, prefetch=True |
+| K_prime_r2_batch8192 | 138470 | 902 | canonical | batch 8192, manual=True, amp=True, prefetch=True, no OOM |
+| K_prime_r3_compile | 124268 | 908 | canonical | batch 8192, manual, AMP, prefetch, torch.compile active, arrow false, early_stop max_wall_seconds |
+| K_prime_r3_pyarrow | 126543 | 901 | canonical | batch 8192, manual, AMP, prefetch, compile off, arrow_used true |
+
+**Notebook default (post-merge):** `train_esmm_parquet_rowgroups` defaults match **K_prime_r2_optimized** (manual batches, AMP + prefetch on CUDA, fused `ESMMModel`, batch still set by caller — Round 4 K uses 4096). Pass `use_manual_batches=False`, `use_amp=False`, `prefetch_row_groups=False` for legacy DataLoader + FP32 behavior.
+
+### Throughput round A — T+U+V
+
+**Runtime:** success, ~31.4 min; log `experiments/logs/20260405_esmm_throughput_papermill.log`. Fresh run after deleting `round_5_results.json` on Colab.
+
+| id | hypothesis (one line) |
+|----|------------------------|
+| T | Enable AMP (mixed precision) for throughput. |
+| U | Add data-loader / input prefetch for throughput. |
+| V | Batch size 4096 configuration for throughput. |
+
+**Critic:** All accepted (T, U, V). Combined **`K_prime_throughput`** = AMP + prefetch.
+
+| leg | samples_per_sec | wall_s | early_stop | amp | prefetch |
+|-----|-----------------|--------|------------|-----|----------|
+| K_prime_baseline | 35604 | 902 | max_wall_seconds | false | false |
+| K_prime_throughput | 35487 | 900 | max_wall_seconds | true | true |
+
+### Throughput round B — W+X+Y
+
+**Runtime:** success, ~46.5 min; log `experiments/logs/20260405_esmm_r2_papermill.log`.
+
+| id | hypothesis (one line) |
+|----|------------------------|
+| W | Fused ESMM embedding. |
+| X | Manual batching for throughput. |
+| Y | Batch size 8192 leg. |
+
+**Critic:** All accepted (W, X, Y).
+
+| leg | samples_per_sec | wall_s | batch | manual | amp | prefetch |
+|-----|-----------------|--------|-------|--------|-----|----------|
+| K_prime_r2_baseline | 33133 | 902 | 4096 | false | false | false |
+| K_prime_r2_optimized | 78415 | 901 | 4096 | true | true | true |
+| K_prime_r2_batch8192 | 138470 | 902 | 8192 | true | true | true |
+
+### Throughput round C — Z+AA (+ AB rejected)
+
+**Runtime:** success, ~31.6 min; log `experiments/logs/20260405_esmm_r3_papermill.log`.
+
+| id | hypothesis (one line) |
+|----|------------------------|
+| Z | Enable `torch.compile` for throughput. |
+| AA | Use PyArrow-backed / accelerated data path for throughput. |
+| AB | (not executed; critic rejected as REDUNDANT vs Z.) |
+
+**Critic:** Accepted Z, AA; rejected AB.
+
+| leg | samples_per_sec | wall_s | batch | compile_active | arrow_used | early_stop |
+|-----|-----------------|--------|-------|----------------|------------|------------|
+| K_prime_r3_compile | 124268 | 908 | 8192 | true | false | max_wall_seconds |
+| K_prime_r3_pyarrow | 126543 | 901 | 8192 | false | true | max_wall_seconds |
 
 ---
 
@@ -183,6 +258,8 @@ Goal CVR_AUC > 0.65 was **not achieved** after 3 rounds. Best result: experiment
 | K: `train_esmm_parquet_rowgroups` — shuffle row-group order each epoch, tensorize per row group only | Peak RAM ≈ largest row group + chunk tensors, not full 42M |
 | Test: single `encode_and_tensorize` for all rows; `evaluate_esmm_cvr_indexed` with boolean mask | Removes duplicate full-test tensorization |
 
+**Later (throughput, 2026-04-05):** Fused single-table `ESMMModel` embedding, optional manual batches, AMP + row-group prefetch; defaults align with **K_prime_r2_optimized** (batch 4096 for Round 4 K unless overridden).
+
 **Not done (defer if still OOM):** Polars rewrite, `torch.load(mmap=True)` checkpoints, true multi-worker IterableDataset.
 
 ---
@@ -238,27 +315,21 @@ Goal CVR_AUC > 0.65 was **not achieved** after 3 rounds. Best result: experiment
 | **DATA_DIR** | `/content/drive/MyDrive/colab/data/ali_ccp` (Colab) |
 | **Sample rounds 1–3** | `SAMPLE_SIZE = 5_000_000` → `processed_esmm_parsed_samples/` |
 | **Round 4 full split** | `processed_esmm_full_parquet/` — `parsed_train_rows_full.parquet`, `parsed_test_rows_full.parquet`, `r4_norm_train/test.parquet` |
-| **Round caches** | `esmm_round_training_cache/round_{1…5}_results.json` — delete one file to force that round only |
+| **Round caches** | `esmm_round_training_cache/round_{1…5}_results.json` — delete one file to force re-run that round only |
 | **Freq-filter vocab cache** | `r4_filtered_sparse_vocab.pkl` — `load_or_build_sparse_vocabs_filtered_parquet` loads when train Parquet mtime/row count + `SPARSE_COLS` + `min_count` match; else full scan then write pickle. Toggle: `CLEAN_R4_VOCAB_CACHE`, `FORCE_REBUILD_R4_VOCAB` |
 | **Git on Colab** | `SKIP_GIT_REPO_SYNC = True` → no fetch/reset if `recsys_playground/` exists; `FORCE_GIT_SYNC=1` env forces sync to `origin/main` |
 | **K early-stop (Round 4)** | `K_EARLY_STOP_MAX_WALL_SECONDS` etc. default **`None`** (full 5-epoch K) |
-| **Round 5 K′** | Same row-group ESMM trainer; default **`R5_K_PRIME_MAX_WALL_SECONDS = 900`** for throughput demos; other caps `None` |
+| **Round 5 K′** | Throughput benchmarks vs legacy baselines; **`R5_K_PRIME_MAX_WALL_SECONDS = 900`** per leg unless changed; optional R3 legs (`torch.compile`, PyArrow) via `R5_RUN_R3_LEGS` |
 | **Round 4 J** | 10 epochs, batch 4096, `R4_BASE_*` LR/WD (default constant LR, wd=0) |
-| **Round 4 K** | 5 epochs, batch 4096, row-group streaming from `R4_NORM_TRAIN` |
+| **Round 4 K** | 5 epochs, **batch 4096**, row-group streaming from `R4_NORM_TRAIN`; **`train_esmm_parquet_rowgroups` defaults:** manual batches, AMP + prefetch on CUDA, fused `ESMMModel` (legacy: pass `use_manual_batches=False`, `use_amp=False`, `prefetch_row_groups=False`) |
 
-**Throughput / encode:** `encode_and_tensorize_fast` + categorical tables for row-group training; `train_esmm_parquet_rowgroups` returns `train_meta` (`samples_per_sec`, `early_stop_reason`, …). Optional print after K in Round 4 for throughput summary.
+**Throughput / encode:** `encode_and_tensorize_fast` (and optional Arrow path), categorical tables; `train_esmm_parquet_rowgroups` returns `train_meta` (`samples_per_sec`, `early_stop_reason`, …). Optional print after K in Round 4 for throughput summary.
 
 ---
 
 ## Round 5 — Throughput / tooling (`K′`)
 
-Notebook **Round 5** runs **K′** (same ESMM row-group recipe as K) with **dev wall cap** by default. Sub-study goal (separate from CVR_AUC > 0.65): bounded wall time and **samples/s** readout.
-
-| Metric | Example (cached run, 2026-04-05) |
-|--------|----------------------------------|
-| K′ wall | ~902 s |
-| samples/s | ~33,671 |
-| early_stop | `max_wall_seconds` |
+Notebook **Round 5** runs additional K′ legs (legacy DataLoader baseline, batch-8192, optional `torch.compile` / PyArrow) with **dev wall cap** by default. Full tables and logs live under **Throughput study** above.
 
 **Note:** A short **papermill** run with all `round_*.json` present skips training and only replays caches (~tens of seconds locally); metrics printed are whatever is stored on Drive (may differ slightly from canonical J/K row above, e.g. ~0.62 / ~0.585 CTCVR in one cache-skipped readout).
 
