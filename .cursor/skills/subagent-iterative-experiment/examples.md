@@ -5,7 +5,7 @@ Synthetic round illustrating payloads between lead and subagents.
 ## Setup (lead, Phase 0)
 
 - `notebook_path`: `notebooks/ad_hoc/experiment_foo.ipynb`
-- `scribe_doc_path`: `experiments/logs/20260325_experiment_foo_trail.md`
+- `scribe_doc_path`: `experiments/logs/20260325_experiment_foo_trial.md`
 - `goal_metric`: `Hit@50`, `goal_threshold`: `0.20`, `goal_operator`: `>`
 
 ---
@@ -175,7 +175,7 @@ log_reference: "papermill experiment_foo_output.ipynb"
 
 ```yaml
 round: 2
-doc_path: "experiments/logs/20260325_experiment_foo_trail.md"
+doc_path: "experiments/logs/20260325_experiment_foo_trial.md"
 current_best:
   experiment: "D"
   metric_name: "Hit@50"

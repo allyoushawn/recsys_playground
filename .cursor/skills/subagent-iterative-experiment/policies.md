@@ -82,9 +82,9 @@ Scribe does not interpret strategy; it records tags per lead/runtime flags and A
 Lead derives once at setup:
 
 ```text
-experiments/logs/YYYYMMDD_<notebook_stem>_trail.md
+experiments/logs/YYYYMMDD_<notebook_stem>_trial.md
 ```
 
-Example: `notebooks/ad_hoc/experiment_foo.ipynb` on 2026-03-25 → `experiments/logs/20260325_experiment_foo_trail.md`.
+Example: `notebooks/ad_hoc/experiment_foo.ipynb` on 2026-03-25 → `experiments/logs/20260325_experiment_foo_trial.md`.
 
 Create `experiments/logs/` if missing. Reuse the same path for all rounds of that run.

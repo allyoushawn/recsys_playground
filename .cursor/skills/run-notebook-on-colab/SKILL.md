@@ -14,6 +14,19 @@ Executes a local Jupyter notebook on a Colab GPU runtime via SSH + papermill,
 so the agent can see errors and fix them directly without manual copy-paste.
 Uses `scp` to sync files directly — no git commit/push/pull needed.
 
+## No git inside the notebook execution path (scp workflow)
+
+**Why some notebooks still have git:** A common Colab pattern is `git clone` / `git pull` / `git reset --hard origin/main` so a human can open the notebook in the browser and always run the latest **GitHub** copy. That is fine for interactive-only use.
+
+**Why it conflicts with this skill:** When Cursor **`scp`s** the notebook to Drive and runs **`papermill`**, the synced `.ipynb` is the **source of truth**. An early cell that runs **`git fetch` + `git reset --hard`** (or similar) **replaces** the repo on disk—including the notebook you just copied—with whatever is on the remote branch. That **undoes `scp`**, drops unpushed local edits, and can run an **older** committed version (e.g. missing vocab-cache code).
+
+**Rule for agent-driven Colab runs:** For notebooks executed via this skill (and **experiment-runtime**), **do not rely on git to deliver the notebook or experiment code** for that run. Sync with **`scp` only**. The notebook should either:
+
+- **Skip** repo-sync cells when running under papermill after an `scp` sync (e.g. env flag, or “if notebook mtime / marker says synced”), or  
+- **Never** `reset --hard` / wholesale checkout over the path that contains the target `.ipynb`.
+
+Preflight should catch destructive git-on-repo-root patterns; see [compatibility.md](compatibility.md).
+
 ## Prerequisites
 
 - `cloudflared` and `sshpass` installed locally (`brew install cloudflared sshpass`)

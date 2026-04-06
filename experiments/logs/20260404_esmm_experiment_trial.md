@@ -1,10 +1,14 @@
-# Experiment Trail Log — ESMM Reproduction
+# Experiment Trial Log — ESMM Reproduction
 
 | Field | Value |
 |-------|-------|
 | **Notebook** | `notebooks/ad_hoc/20260404_esmm_experiment.ipynb` |
 | **Goal metric** | CVR_AUC > 0.65 |
 | **Date started** | 2026-04-04 |
+| **Last updated** | 2026-04-05 |
+| **Canonical copy** | Same history is also summarized in the **final markdown cell** of the notebook (see `notebook-conventions.md`). This file is the repo-side trial log. |
+
+**Execution policy (Cursor / Colab):** Sync the notebook with **`scp` + `papermill`** only — **do not** rely on `git push` to Colab. The notebook defaults to **`SKIP_GIT_REPO_SYNC = True`** so `git reset --hard` does not replace the synced file. See `.cursor/skills/run-notebook-on-colab/SKILL.md` and `compatibility.md` §5.
 
 ---
 
@@ -142,6 +146,8 @@ Goal CVR_AUC > 0.65 was **not achieved** after 3 rounds. Best result: experiment
 
 ## Round 4 — status (resume)
 
+*Historical infra notes below; J/K **completed** — see **Round 4 — executed** for metrics.*
+
 **Target:** Experiments **J** (BASE on full split + freq filter + batch 4096 + log1p) and **K** (ESMM, 5 epochs) using Parquet under `DATA_DIR/processed_esmm_full_parquet/`.
 
 **2026-04-04 runtime attempt (earth-radius-controlling-switch):** **INFRA failure** — SSH / Cloudflare tunnel dropped mid-run (`Connection closed by remote host`, then `websocket: bad handshake`). Papermill had **not reached Round 4**; it was still executing earlier round cells when the session ended. No J/K metrics recorded.
@@ -222,3 +228,52 @@ Goal CVR_AUC > 0.65 was **not achieved** after 3 rounds. Best result: experiment
 - K: CTCVR_AUC 0.5917 recorded; J: CTCVR_AUC not reported in metrics payload (null).
 - K: wall_clock_seconds 7094 vs J 337.
 - Goal CVR_AUC > 0.65: best observed 0.6158 remains below threshold (mechanical: goal not achieved).
+
+---
+
+## Notebook setup & artifacts (reference)
+
+| Topic | Default / location |
+|--------|-------------------|
+| **DATA_DIR** | `/content/drive/MyDrive/colab/data/ali_ccp` (Colab) |
+| **Sample rounds 1–3** | `SAMPLE_SIZE = 5_000_000` → `processed_esmm_parsed_samples/` |
+| **Round 4 full split** | `processed_esmm_full_parquet/` — `parsed_train_rows_full.parquet`, `parsed_test_rows_full.parquet`, `r4_norm_train/test.parquet` |
+| **Round caches** | `esmm_round_training_cache/round_{1…5}_results.json` — delete one file to force that round only |
+| **Freq-filter vocab cache** | `r4_filtered_sparse_vocab.pkl` — `load_or_build_sparse_vocabs_filtered_parquet` loads when train Parquet mtime/row count + `SPARSE_COLS` + `min_count` match; else full scan then write pickle. Toggle: `CLEAN_R4_VOCAB_CACHE`, `FORCE_REBUILD_R4_VOCAB` |
+| **Git on Colab** | `SKIP_GIT_REPO_SYNC = True` → no fetch/reset if `recsys_playground/` exists; `FORCE_GIT_SYNC=1` env forces sync to `origin/main` |
+| **K early-stop (Round 4)** | `K_EARLY_STOP_MAX_WALL_SECONDS` etc. default **`None`** (full 5-epoch K) |
+| **Round 5 K′** | Same row-group ESMM trainer; default **`R5_K_PRIME_MAX_WALL_SECONDS = 900`** for throughput demos; other caps `None` |
+| **Round 4 J** | 10 epochs, batch 4096, `R4_BASE_*` LR/WD (default constant LR, wd=0) |
+| **Round 4 K** | 5 epochs, batch 4096, row-group streaming from `R4_NORM_TRAIN` |
+
+**Throughput / encode:** `encode_and_tensorize_fast` + categorical tables for row-group training; `train_esmm_parquet_rowgroups` returns `train_meta` (`samples_per_sec`, `early_stop_reason`, …). Optional print after K in Round 4 for throughput summary.
+
+---
+
+## Round 5 — Throughput / tooling (`K′`)
+
+Notebook **Round 5** runs **K′** (same ESMM row-group recipe as K) with **dev wall cap** by default. Sub-study goal (separate from CVR_AUC > 0.65): bounded wall time and **samples/s** readout.
+
+| Metric | Example (cached run, 2026-04-05) |
+|--------|----------------------------------|
+| K′ wall | ~902 s |
+| samples/s | ~33,671 |
+| early_stop | `max_wall_seconds` |
+
+**Note:** A short **papermill** run with all `round_*.json` present skips training and only replays caches (~tens of seconds locally); metrics printed are whatever is stored on Drive (may differ slightly from canonical J/K row above, e.g. ~0.62 / ~0.585 CTCVR in one cache-skipped readout).
+
+---
+
+## Recent runtime — experiment-runtime (2026-04-05)
+
+| Field | Value |
+|-------|-------|
+| **Host** | `emerging-hobby-conservative-planned.trycloudflare.com` (Cloudflare tunnel; hostname expires when Colab session ends) |
+| **Sync** | `scp` notebook → `…/recsys_playground/recsys_playground/notebooks/ad_hoc/` |
+| **Command** | Remote `papermill` → `20260404_esmm_experiment_output.ipynb` |
+| **Outcome** | Success ~79 s wall when rounds 1–5 **cache-skipped** on Drive |
+| **GPU** | Tesla T4 |
+
+For a **full re-train**, clear relevant `round_n_results.json` (and optionally vocab/normalize flags in Config) on Drive before re-running.
+
+---

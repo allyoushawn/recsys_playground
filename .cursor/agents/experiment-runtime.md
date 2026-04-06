@@ -17,7 +17,7 @@ You **execute, monitor, classify**. You apply only **execution-safe** fixes per 
 ## Procedure
 
 1. **Preflight**: gpu-review — fix **Critical** only (device detection, `.to(device)`, hardcoded CPU). Do **not** add mixed precision, `pin_memory`, or other Performance-row changes that alter training semantics without lead approval.
-2. **Preflight**: papermill compatibility per `run-notebook-on-colab/compatibility.md`.
+2. **Preflight**: papermill compatibility per `run-notebook-on-colab/compatibility.md`. **Explicitly** check for **git** in the notebook (`git reset --hard`, `git pull`, etc.) on the repo that contains the target `.ipynb`: that **overwrites** the `scp` sync and is **incompatible** with the “scp only” policy. Flag for **code-change** to skip/gate those cells unless the lead opts in.
 3. **Sync to Colab via scp** — NEVER use git commit/push. Use the exact scp command from `run-notebook-on-colab` Phase 3:
    ```bash
    sshpass -p "cursorssh" scp <SSH_OPTS> <LOCAL_NOTEBOOK_PATH> root@<HOSTNAME>:<REMOTE_REPO_ROOT>/<NOTEBOOK_PATH>

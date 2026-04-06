@@ -23,7 +23,7 @@
 
 ## Scribe
 
-- [ ] Log file created at `experiments/logs/YYYYMMDD_<stem>_trail.md`.
+- [ ] Log file created at `experiments/logs/YYYYMMDD_<stem>_trial.md`.
 - [ ] Append-only; no strategy “we should” language in observations.
 - [ ] Leaderboard rows include `comparability`.
 - [ ] After AUTO-UNBLOCK operational fix, tag `operational_downgrade`.

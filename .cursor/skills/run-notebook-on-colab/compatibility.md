@@ -83,6 +83,25 @@ However, don't gate critical logic (like repo cloning) solely on `IN_COLAB`,
 since papermill on Colab SSH will still report `IN_COLAB = True` but won't
 have the interactive environment.
 
+## 5. Git sync that overwrites the notebook (scp + papermill conflict)
+
+**Breaks / confuses because:** The agent copies the notebook with **`scp`**. A later cell that runs **`git reset --hard`**, **`git pull --rebase`**, or similar on the **same repo directory** restores GitHub’s tree and **replaces** the file `papermill` is executing—often reverting local-only fixes and making runs **non-reproducible** with the machine that did `scp`.
+
+**Bad (for scp-driven runs):**
+
+```python
+subprocess.run(['git', 'fetch', '--all'], check=True)
+subprocess.run(['git', 'reset', '--hard', 'origin/main'], check=False)
+# ... then papermill continues with whatever commit was on GitHub, not your scp'd notebook
+```
+
+**Good:**
+
+- **Skip** repo-update cells when the notebook is the `scp` sync target (environment variable set by the operator, or a documented `SKIP_GIT_REPO_SYNC = True` in Config for papermill runs).
+- Or **only** clone when the repo directory is missing—**never** hard-reset the checkout that contains the experiment `.ipynb` during a papermill run meant to test the local copy.
+
+**Policy:** For Colab execution coordinated from Cursor, **file transfer is `scp` only**; **do not use git inside the notebook** to refresh the same tree you just synced. See [SKILL.md](SKILL.md) (“No git inside the notebook execution path”).
+
 ## Quick Scan
 
 When reviewing a notebook, search for these patterns:
@@ -90,3 +109,4 @@ When reviewing a notebook, search for these patterns:
 - Lines starting with `%` (magic commands)
 - Lines starting with `!` (shell commands)
 - `assert os.path.exists('/content/drive')`
+- `git reset`, `git pull`, `git checkout` / `fetch` + `reset --hard` on the repo that holds the target notebook (scp workflow conflict)

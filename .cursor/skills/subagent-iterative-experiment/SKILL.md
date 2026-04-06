@@ -67,7 +67,7 @@ Each numbered step below MUST be a **Task tool call** to the named subagent. Do 
 4. If `needs_replan`: increment `critic_replan_streak`; if streak **≥ 3**, escalate; on auto-unblock without user, **stop** and scribe (see policies). Else delegate to planner again (same round number).
 5. **Code-change**: if `execution_route == code_change_then_runtime`, **delegate to `/experiment-code-change`**. If `runtime_only`, skip.
 6. **Runtime**: **delegate to `/experiment-runtime`** — uses scp + papermill (NEVER git push); preflight = execution-safe + GPU **Critical** only (see policies).
-7. **Scribe**: **delegate to `/experiment-scribe`** — append trail, leaderboard rows with **comparability** tags, evidence-only observations.
+7. **Scribe**: **delegate to `/experiment-scribe`** — append trial log, leaderboard rows with **comparability** tags, evidence-only observations.
 8. Lead updates `run_state`, checks goal / max rounds, continues or prints final summary. This is the ONLY step the lead does itself.
 
 ## Routing rules
@@ -81,11 +81,13 @@ Each numbered step below MUST be a **Task tool call** to the named subagent. Do 
 
 How to invoke: use the Task tool with `subagent_type` set to the appropriate type, or invoke by name (e.g. `/experiment-planner`). **Always** paste a **Handoff block** (see contracts.md) in the task prompt — subagents have no chat history.
 
-The lead's job is to **orchestrate and route**, not to propose hypotheses, review proposals, edit notebooks, execute on Colab, write trail logs, or analyze history. If you find yourself doing any of those directly, stop and delegate to the correct subagent instead.
+The lead's job is to **orchestrate and route**, not to propose hypotheses, review proposals, edit notebooks, execute on Colab, write trial logs (the `*_trial.md` artifact), or analyze history. If you find yourself doing any of those directly, stop and delegate to the correct subagent instead.
 
 ## File sync: scp only, NEVER git
 
 **CRITICAL:** To sync notebooks to Colab, use `scp` per [run-notebook-on-colab/SKILL.md](../run-notebook-on-colab/SKILL.md). **NEVER** use `git add`, `git commit`, `git push`, or any git-based workflow to transfer files to the Colab runtime. The Colab environment reads from Drive, and `scp` writes directly there over SSH. Git round-trips are slow, unnecessary, and break the workflow.
+
+**Also critical — no git *inside* the notebook during that run:** Many Colab notebooks run `git fetch` / `git reset --hard origin/main` to refresh the repo in the browser. That **overwrites** the `scp`’d notebook with GitHub `main` and **voids** the local copy you intended to execute. For experiment notebooks managed by **experiment-runtime**, preflight / **experiment-code-change** should **disable or gate** those cells (e.g. `SKIP_GIT_REPO_SYNC`) so **papermill** runs exactly the synced file. See [run-notebook-on-colab/SKILL.md](../run-notebook-on-colab/SKILL.md) (“No git inside the notebook execution path”) and [compatibility.md](../run-notebook-on-colab/compatibility.md) §5.
 
 ```bash
 sshpass -p "cursorssh" scp <SSH_OPTS> \

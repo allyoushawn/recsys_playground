@@ -1,7 +1,7 @@
 ---
 name: experiment-scribe
 description: >-
-  Appends structured experiment memory to the trail log and leaderboard rows with
+  Appends structured experiment memory to the trial log (`*_trial.md`) and leaderboard rows with
   comparability tags. Use after each runtime completion. Evidence only; no strategy advice.
 model: fast
 readonly: false
