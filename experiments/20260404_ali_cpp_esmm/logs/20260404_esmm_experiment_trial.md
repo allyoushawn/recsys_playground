@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Notebook** | `notebooks/ad_hoc/20260404_esmm_experiment.ipynb` |
+| **Notebook** | `experiments/20260404_ali_cpp_esmm/20260404_esmm_experiment.ipynb` |
 | **Goal metric** | CVR_AUC > 0.65 |
 | **Date started** | 2026-04-04 |
 | **Last updated** | 2026-04-05 |
@@ -237,7 +237,7 @@ Goal CVR_AUC > 0.65 was **not achieved** after 3 rounds. Best result: experiment
 
 **2026-04-05 runtime attempt (`inch-utility-leading-spatial.trycloudflare.com`):** **INFRA** — SSH dropped during **Round 4 Cell 13** while parsing full split (`sample_skeleton_train` tqdm; no Parquet cache for `sample=full` yet). **Rounds 1–3** completed from **cached** JSON on Drive (printed: A CVR_AUC=0.5526; D CVR_AUC=0.5339; G CVR_AUC=0.5727; H CVR_AUC=0.5550 — values reflect remote cache, may differ slightly from earlier canonical trail rows). **J/K not finished.** Log: `experiments/logs/20260405_esmm_runtime_papermill.log`.
 
-**Next run:** Refresh tunnel hostname if rotated → **scp** latest `20260404_esmm_experiment.ipynb` → **papermill**. Optional: in Config set `CLEAN_ROUND_RESULT_JSON = []` (keep caches for R1–3); only use cleanup flags if you need to invalidate artifacts. Once `parsed_train_rows_full.parquet` exists under `processed_esmm_full_parquet/`, Round 4 skips the long raw parse.
+**Next run:** Refresh tunnel hostname if rotated → **scp** latest `experiments/20260404_ali_cpp_esmm/20260404_esmm_experiment.ipynb` → **papermill**. Optional: in Config set `CLEAN_ROUND_RESULT_JSON = []` (keep caches for R1–3); only use cleanup flags if you need to invalidate artifacts. Once `parsed_train_rows_full.parquet` exists under `processed_esmm_full_parquet/`, Round 4 skips the long raw parse.
 
 ---
 
@@ -247,7 +247,7 @@ Goal CVR_AUC > 0.65 was **not achieved** after 3 rounds. Best result: experiment
 
 **Consultant alignment:** Both recommended (1) stop materializing full 42M-row training tensors for ESMM, (2) use compact dtypes, (3) serialize J then K without overlapping giant tensors, (4) stream or chunk from Parquet. OpenAI: store int32 on host, cast to `long` at batch for `nn.Embedding`. Gemini: same + IterableDataset / mmap if needed.
 
-**Implemented in `20260404_esmm_experiment.ipynb`:**
+**Implemented in `experiments/20260404_ali_cpp_esmm/20260404_esmm_experiment.ipynb`:**
 
 | Change | Rationale |
 |--------|-----------|
@@ -340,7 +340,7 @@ Notebook **Round 5** runs additional K′ legs (legacy DataLoader baseline, batc
 | Field | Value |
 |-------|-------|
 | **Host** | `emerging-hobby-conservative-planned.trycloudflare.com` (Cloudflare tunnel; hostname expires when Colab session ends) |
-| **Sync** | `scp` notebook → `…/recsys_playground/recsys_playground/notebooks/ad_hoc/` |
+| **Sync** | `scp` notebook → `…/recsys_playground/recsys_playground/experiments/20260404_ali_cpp_esmm/` |
 | **Command** | Remote `papermill` → `20260404_esmm_experiment_output.ipynb` |
 | **Outcome** | Success ~79 s wall when rounds 1–5 **cache-skipped** on Drive |
 | **GPU** | Tesla T4 |
