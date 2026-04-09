@@ -16,6 +16,7 @@
 | R3_R6_MMoE | **0.6164** | 0.6620 | 0.6086 | ~2120 | canonical | Legacy CTCVR_AUC 0.6164; best CTCVR_AUC this runtime; +0.0215 vs prior leaderboard R6_MMoE 0.5949. |
 | R3_R6_PLE | — | — | — | — | non_comparable | Papermill aborted: AcceleratorError CUDA device-side assert in GradScaler.step; no metrics. |
 | R3_R7 | — | — | — | — | non_comparable | Not reached (runtime failed during R6 PLE; K_ref/PLE legs for R7 not run). |
+| R4_baseline | 0.6114 | 0.6458 | — | ~1961 | canonical | 2026-04-08 Colab; Tesla T4; full-data 5 epochs; SHARED_BOTTOM/MMoE/PLE skipped; `scp` notebook + `esmm_ali_ccp_impl.py`; host `ant-gordon-downloading-employed.trycloudflare.com`. |
 
 ---
 
@@ -150,3 +151,53 @@ Round 4 cache on that runtime reports **K: CTCVR_AUC=0.5851** (for comparison af
 - R3_R6_MMoE CTCVR_AUC 0.6164 vs goal baseline line CTCVR_AUC > 0.5917 (+0.0247 margin on CTCVR_AUC vs threshold 0.5917).
 - R3_R6_K_ref wall_train ~1968 s vs R3_R6_SharedBottom ~1868 s (−100 s); R3_R6_MMoE ~2120 s vs R3_R6_SharedBottom ~1868 s (+252 s).
 - `round_6_results.json` absent; PLE leg and Round 7 produced no comparable metric rows.
+
+---
+
+## Round 4 (runtime-only — baseline)
+
+**Context:** Lead delegated **experiment-runtime** to execute the notebook end-to-end on Colab with a fresh tunnel. **Host:** `ant-gordon-downloading-employed.trycloudflare.com`.
+
+### Planner / Critic / Code-change
+
+- Skipped (not run this round).
+
+### Runtime
+
+- **Status:** success (`exit_code: 0`).
+- **Wall clock (papermill):** ~49.4 min.
+- **GPU:** Tesla T4 (~14.6 GB).
+- **Sync:** `scp` of `experiments/20260404_ali_cpp_esmm/20260404_esmm_experiment.ipynb` and `experiments/20260404_ali_cpp_esmm/esmm_ali_ccp_impl.py` to `/content/drive/MyDrive/colab/recsys_playground/recsys_playground`; no git sync.
+- **Notebook:** `[SKIP_GIT_REPO_SYNC]` path respected; pip install cell exit 0; device **cuda**.
+- **Config this run:** **BASELINE** leg only; SHARED_BOTTOM / MMoE / PLE not executed.
+- **Output (remote):** `experiments/20260404_ali_cpp_esmm/20260404_esmm_experiment_output.ipynb`.
+- **Retries:** 0.
+
+### Results
+
+| run | CTCVR_AUC | CVR_AUC | CTR_AUC | wall_train_s | comparability |
+|-----|-----------|---------|---------|--------------|---------------|
+| R4_baseline | 0.6114 | 0.6458 | — | ~1961 | canonical |
+
+**Auxiliary (cell log):** train_samples ≈ 211,499,525; train_throughput ≈ 108,305 samples/s; model_params ≈ 42,204,292; final train loss ≈ 0.1460.
+
+### Observations
+
+- R4_baseline CTCVR_AUC 0.6114 vs goal line CTCVR_AUC > 0.5917 (+0.0197 margin vs threshold 0.5917).
+- R4_baseline CTCVR_AUC 0.6114 vs R3_R6_MMoE CTCVR_AUC 0.6164 (−0.0050 on CTCVR_AUC); legs differ (single baseline track vs Round 6 MMoE).
+- R4_baseline CVR_AUC 0.6458 vs R3_R6_MMoE CVR_AUC 0.6620 (−0.0162 on CVR_AUC).
+- R4_baseline wall_train ~1961 s vs R3_R6_MMoE ~2120 s (−159 s).
+
+### SCRIBE_OUTPUT (mechanical)
+
+```yaml
+round: 4
+goal_achieved: true
+goal_metric: CTCVR_AUC
+goal_threshold: 0.5917
+best_this_round:
+  experiment: R4_baseline
+  CTCVR_AUC: 0.6114
+leaderboard_rows_added: 1
+scribe_doc_path: experiments/20260404_ali_cpp_esmm/logs/20260405_mtl_esmm_experiment_trial.md
+```
