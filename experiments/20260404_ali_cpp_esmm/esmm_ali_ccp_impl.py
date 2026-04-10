@@ -9,6 +9,7 @@ import os
 import pickle
 import tarfile
 from collections import Counter
+from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
@@ -970,17 +971,23 @@ class ESMM_PLE(nn.Module):
         self.tower_cvr = _ESMM_PLETower(d_model, 1)
 
     def forward(self, sparse_x, dense_x):
-        idx = sparse_x.long() + self.field_offsets
-        e = self.unified_emb(idx)
-        x = torch.cat([e.flatten(1), dense_x], dim=1)
-        g1_t1, g1_t2, g1_sh = self.level1(x, x, x, x)
-        g2_t1, g2_t2, g2_sh = self.level2(x, g1_t1, g1_t2, g1_sh)
-        g2_t1 = torch.nan_to_num(g2_t1, nan=0.0, posinf=1e4, neginf=-1e4)
-        g2_t2 = torch.nan_to_num(g2_t2, nan=0.0, posinf=1e4, neginf=-1e4)
-        p_ctr = torch.sigmoid(self.tower_ctr(g2_t1).squeeze(1)).clamp(1e-7, 1 - 1e-7)
-        p_cvr = torch.sigmoid(self.tower_cvr(g2_t2).squeeze(1)).clamp(1e-7, 1 - 1e-7)
-        p_ctcvr = (p_ctr * p_cvr).clamp(1e-7, 1 - 1e-7)
-        return p_ctr, p_cvr, p_ctcvr
+        # Deep PLE + LayerNorm under fp16 autocast can overflow; run forward in fp32 on CUDA.
+        _ac = torch.amp.autocast('cuda', enabled=False) if sparse_x.is_cuda else nullcontext()
+        with _ac:
+            idx = sparse_x.long() + self.field_offsets
+            e = self.unified_emb(idx)
+            x = torch.cat([e.flatten(1), dense_x], dim=1)
+            g1_t1, g1_t2, g1_sh = self.level1(x, x, x, x)
+            g1_t1 = torch.nan_to_num(g1_t1, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-50.0, 50.0)
+            g1_t2 = torch.nan_to_num(g1_t2, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-50.0, 50.0)
+            g1_sh = torch.nan_to_num(g1_sh, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-50.0, 50.0)
+            g2_t1, g2_t2, g2_sh = self.level2(x, g1_t1, g1_t2, g1_sh)
+            g2_t1 = torch.nan_to_num(g2_t1, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-50.0, 50.0)
+            g2_t2 = torch.nan_to_num(g2_t2, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-50.0, 50.0)
+            p_ctr = torch.sigmoid(self.tower_ctr(g2_t1).squeeze(1)).clamp(1e-7, 1 - 1e-7)
+            p_cvr = torch.sigmoid(self.tower_cvr(g2_t2).squeeze(1)).clamp(1e-7, 1 - 1e-7)
+            p_ctcvr = (p_ctr * p_cvr).clamp(1e-7, 1 - 1e-7)
+            return p_ctr, p_cvr, p_ctcvr
 
 
 # --------------- ESMM Training ---------------
@@ -1349,6 +1356,15 @@ def encode_and_tensorize_arrow(table, enc_tables, sparse_cols, dense_feat_cols, 
     return sparse_t, dense_t, label_t
 
 
+def _esmm_multitask_bce_from_probs(p_ctr, p_ctcvr, y_click, y_ctcvr, eps=1e-6):
+    """BCE on probabilities with float32 + clamp; avoids CUDA asserts from NaN/Inf or (0,1) drift under AMP."""
+    yc = torch.nan_to_num(y_click.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    ycc = torch.nan_to_num(y_ctcvr.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+    pc = torch.nan_to_num(p_ctr.float(), nan=0.5, posinf=1.0, neginf=0.0).clamp(eps, 1.0 - eps)
+    pcc = torch.nan_to_num(p_ctcvr.float(), nan=0.5, posinf=1.0, neginf=0.0).clamp(eps, 1.0 - eps)
+    return nn.functional.binary_cross_entropy(pc, yc) + nn.functional.binary_cross_entropy(pcc, ycc)
+
+
 def train_esmm_parquet_rowgroups(
     parquet_path, vocabs, field_cardinalities, sparse_cols, dense_feat_cols,
     epochs=5, batch_size=4096, lr=1e-3, seed=42,
@@ -1371,8 +1387,9 @@ def train_esmm_parquet_rowgroups(
     break with EARLY_STOP. Optimizer steps are cumulative across epochs; batch and
     row-group caps reset each epoch. Wall clock uses perf_counter from train start.
 
-    use_amp: if True and CUDA, forward runs under autocast; BCE is computed in float32
-    on detached head outputs to reduce underflow. Default True (no-op on CPU).
+    use_amp: if True and CUDA, forward runs under autocast; BCE uses the float32 multitask
+    helper. Default True (no-op on CPU). **Always treated as False for ESMM_PLE** (AMP caused
+    CUDA BCE domain asserts and unstable half-precision in the deep gated stack).
 
     prefetch_row_groups: if True, overlap Parquet decode/tensor prep for the next row
     group with training on the current (ThreadPoolExecutor max_workers=1, depth 1). Default True.
@@ -1402,6 +1419,13 @@ def train_esmm_parquet_rowgroups(
     else:
         model = model_ctor(field_cardinalities, len(dense_feat_cols), embed_dim, **_mkw)
     model.to(device)
+    if isinstance(model, ESMM_PLE):
+        if use_amp:
+            print(
+                '[train_esmm_parquet_rowgroups] ESMM_PLE: forcing use_amp=False '
+                '(disable autocast/GradScaler for numerical stability).'
+            )
+        use_amp = False
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-8)
     use_amp_cuda = bool(use_amp and device.type == 'cuda')
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp_cuda)
@@ -1479,17 +1503,13 @@ def train_esmm_parquet_rowgroups(
                     if use_amp_cuda:
                         with torch.amp.autocast('cuda', enabled=True):
                             p_ctr, _, p_ctcvr = model(sp_b, dn_b)
-                        loss = (
-                            nn.functional.binary_cross_entropy(p_ctr.float(), yc_b.float())
-                            + nn.functional.binary_cross_entropy(p_ctcvr.float(), ycc_b.float())
-                        )
+                        loss = _esmm_multitask_bce_from_probs(p_ctr, p_ctcvr, yc_b, ycc_b)
                         scaler.scale(loss).backward()
                         scaler.step(optimizer)
                         scaler.update()
                     else:
                         p_ctr, _, p_ctcvr = model(sp_b, dn_b)
-                        loss = (nn.functional.binary_cross_entropy(p_ctr, yc_b) +
-                                nn.functional.binary_cross_entropy(p_ctcvr, ycc_b))
+                        loss = _esmm_multitask_bce_from_probs(p_ctr, p_ctcvr, yc_b, ycc_b)
                         loss.backward()
                         optimizer.step()
             del sp0, dn0, yc0, ycc0
@@ -1514,17 +1534,13 @@ def train_esmm_parquet_rowgroups(
             if use_amp_cuda:
                 with torch.amp.autocast('cuda', enabled=True):
                     p_ctr, _, p_ctcvr = model(sp_b, dn_b)
-                loss = (
-                    nn.functional.binary_cross_entropy(p_ctr.float(), yc_b.float())
-                    + nn.functional.binary_cross_entropy(p_ctcvr.float(), ycc_b.float())
-                )
+                loss = _esmm_multitask_bce_from_probs(p_ctr, p_ctcvr, yc_b, ycc_b)
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 p_ctr, _, p_ctcvr = model(sp_b, dn_b)
-                loss = (nn.functional.binary_cross_entropy(p_ctr, yc_b) +
-                        nn.functional.binary_cross_entropy(p_ctcvr, ycc_b))
+                loss = _esmm_multitask_bce_from_probs(p_ctr, p_ctcvr, yc_b, ycc_b)
                 loss.backward()
                 optimizer.step()
             total_loss += loss.item()
