@@ -10,7 +10,7 @@ description: >-
 
 # Subagent iterative experiment (orchestration)
 
-The **parent Cursor Agent** is the **lead**: it holds `run_state`, invokes custom subagents in order, and applies [policies.md](policies.md). Specialist work is delegated to `.cursor/agents/experiment-*.md` per [Cursor Subagents](https://cursor.com/docs/subagents).
+The **lead** holds `run_state`, invokes custom subagents in order, and applies [policies.md](policies.md). Specialist work is delegated to `~/.claude/agents/experiment-*.md` (global Claude agents).
 
 **Do not** nest subagents. Only the lead chains them.
 
