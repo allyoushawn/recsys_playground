@@ -65,7 +65,7 @@ HOSTNAME=$(python3 scripts/trigger_colab_bootstrap.py)
 
 The script (`scripts/trigger_colab_bootstrap.py`):
 - Launches system Chrome with **`~/.colab_chrome_profile`** over CDP (run **`--setup`** once if that profile is not signed in)
-- Opens `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` via its GitHub URL
+- Opens `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` via its GitHub URL (notebook runs **colab-ssh before `drive.mount`** so the tunnel hostname is usually visible before the Drive consent dialog)
 - Connects to a GPU runtime (waits up to 3 min for allocation)
 - Runs all cells (`Ctrl+F9`)
 - Waits for the `trycloudflare.com` hostname in cell output
