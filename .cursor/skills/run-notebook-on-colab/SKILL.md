@@ -40,7 +40,7 @@ Gather from the user message or ask if missing:
 | Input | Description | Example |
 |-------|-------------|---------|
 | Notebook path | Relative path to the .ipynb | `notebooks/ad_hoc/experiment_amazon_review_game.ipynb` |
-| Colab hostname | Auto-fetched via trigger script (Phase 2) | `loud-turkey-abc.trycloudflare.com` |
+| Colab hostname | **User provides** after manual bootstrap (Phase 2) | `loud-turkey-abc.trycloudflare.com` |
 
 If the user gives a short name like `experiment_amazon_review_game`, resolve it
 by searching `notebooks/` for a matching `.ipynb` file.
@@ -54,26 +54,24 @@ by searching `notebooks/` for a matching `.ipynb` file.
 2. **Fix any issues found** and tell the user what changed.
 3. No commit/push needed — files are synced via `scp` in Phase 3.
 
-### Phase 2: Connect to Colab (automated)
+### Phase 2: Connect to Colab (manual bootstrap — default)
 
-Run the trigger script to automatically open the bootstrap notebook, allocate
-a GPU runtime, run all cells, and capture the cloudflared hostname:
+**Do not** rely on `scripts/trigger_colab_bootstrap.py` for the default skill path
+(Playwright/CDP automation proved too brittle: Colab UI locale, Drive consent,
+`networkidle`, long GPU waits, and hostname timing). The script remains in the
+repo for **optional** experiments only.
 
-```bash
-HOSTNAME=$(python3 scripts/trigger_colab_bootstrap.py)
-```
+Ask the user to:
 
-The script (`scripts/trigger_colab_bootstrap.py`):
-- Launches system Chrome with **`~/.colab_chrome_profile`** over CDP (run **`--setup`** once if that profile is not signed in)
-- Opens `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` via its GitHub URL (notebook runs **colab-ssh before `drive.mount`** so the tunnel hostname is usually visible before the Drive consent dialog)
-- Connects to a GPU runtime (waits up to 3 min for allocation)
-- Runs all cells (`Ctrl+F9`)
-- Waits for the `trycloudflare.com` hostname in cell output
-- Prints the hostname to stdout
+1. Open the bootstrap notebook in Colab (same repo path on **GitHub** so Colab
+   sees the latest committed notebook):
+   - `https://colab.research.google.com/github/allyoushawn/recsys_playground/blob/main/notebooks/ad_hoc/colab_ssh_bootstrap.ipynb`
+2. **Connect** a GPU (or T4) runtime and **Run all** (or run cells until the
+   colab-ssh cell prints the tunnel line).
+3. **Copy the `*.trycloudflare.com` hostname** from the cell output and **paste
+   it into the chat** (or provide it explicitly).
 
-**If the script fails** (e.g. Google auth challenge, runtime quota exceeded),
-fall back to manual: ask the user to open the bootstrap notebook and paste the
-hostname.
+Use that value as `<HOSTNAME>`.
 
 Once `<HOSTNAME>` is obtained, verify connectivity:
 
