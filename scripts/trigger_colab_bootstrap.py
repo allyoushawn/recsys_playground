@@ -121,8 +121,41 @@ async def _handle_modal(page, detect_text, click_label, timeout_ms=3_000):
             return False
 
 
+# Colab "trusted notebook" warning is localized. Match body fragments + button labels.
+_TRUSTED_NOTEBOOK_HINTS = [
+    ("not authored by Google", "Run anyway"),
+    ("並非由 Google", "仍要執行"),  # zh-TW (and many zh variants in title)
+    ("并非由 Google", "仍然运行"),  # zh-CN — title / button wording may vary by region
+]
+
+
+async def _dismiss_trusted_notebook_warning(page):
+    """Dismiss 'notebook not authored by Google' (GitHub / third-party) dialog in any locale."""
+    for detect, click in _TRUSTED_NOTEBOOK_HINTS:
+        if await _handle_modal(page, detect, click, timeout_ms=2_000):
+            return True
+    # Last resort: primary action label only (avoids missing new English variants).
+    try:
+        btn = page.get_by_role(
+            "button",
+            name=re.compile(
+                r"Run anyway|仍要執行|仍然运行|继续运行|繼續執行|"
+                r"Ejecutar de todos modos|Ejecutar de todas formas|Ausführen|Exécuter quand même",
+                re.I,
+            ),
+        ).first
+        if await btn.is_visible(timeout=2_000):
+            print("[trigger] Trusted-notebook dialog → Run anyway (regex match).", file=sys.stderr)
+            await btn.click(timeout=5_000)
+            await asyncio.sleep(1)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _handle_all_modals(ctx, page):
-    await _handle_modal(page, "not authored by Google", "Run anyway")
+    await _dismiss_trusted_notebook_warning(page)
     for text in ["Dismiss", "Got it", "No thanks"]:
         try:
             btn = page.locator(f"text={text}").first
@@ -221,6 +254,7 @@ async def _wait_for_hostname(ctx):
     while asyncio.get_event_loop().time() < deadline:
         page = _colab_page(ctx)
         if page:
+            await _dismiss_trusted_notebook_warning(page)
             for frame in page.frames:
                 host = await _hostname_from_frame(frame)
                 if host:
@@ -310,7 +344,10 @@ async def trigger_bootstrap() -> str:
 
             await page.keyboard.press("Control+F9")
             print("[trigger] Running all cells...", file=sys.stderr)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
+            # "Run anyway" often appears only after Run all (localized UI).
+            page = _colab_page(ctx) or page
+            page = await _handle_all_modals(ctx, page)
 
             hostname = await _wait_for_hostname(ctx)
             await browser.disconnect()
