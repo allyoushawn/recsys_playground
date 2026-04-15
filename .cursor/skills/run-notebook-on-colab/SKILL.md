@@ -54,26 +54,28 @@ by searching `notebooks/` for a matching `.ipynb` file.
 2. **Fix any issues found** and tell the user what changed.
 3. No commit/push needed — files are synced via `scp` in Phase 3.
 
-### Phase 2: Connect to Colab (manual bootstrap — default)
+### Phase 2: Connect to Colab (fully automated via trigger script)
 
-**Do not** rely on `scripts/trigger_colab_bootstrap.py` for the default skill path
-(Playwright/CDP automation proved too brittle: Colab UI locale, Drive consent,
-`networkidle`, long GPU waits, and hostname timing). The script remains in the
-repo for **optional** experiments only.
+**One-time setup (first use only):**
+```bash
+cd /Users/fox/Projects/CodexProjects/recsys_playground
+python3 scripts/trigger_colab_bootstrap.py --setup
+```
+Opens Chrome to accounts.google.com. Sign in, then close Chrome. Session is saved to `~/.colab_chrome_profile/` and persists across runs.
 
-Ask the user to:
+**Normal run (fully automated):**
+```bash
+cd /Users/fox/Projects/CodexProjects/recsys_playground
+HOSTNAME=$(python3 scripts/trigger_colab_bootstrap.py)
+```
+The script: launches Chrome with the saved session → opens the bootstrap notebook on GitHub → connects a GPU runtime → runs all cells → waits for the notebook to relay the hostname via ntfy.sh → prints the hostname to stdout.
 
-1. Open the bootstrap notebook in Colab (same repo path on **GitHub** so Colab
-   sees the latest committed notebook):
-   - `https://colab.research.google.com/github/allyoushawn/recsys_playground/blob/main/notebooks/ad_hoc/colab_ssh_bootstrap.ipynb`
-2. **Connect** a GPU (or T4) runtime and **Run all** (or run cells until the
-   colab-ssh cell prints the tunnel line).
-3. **Copy the `*.trycloudflare.com` hostname** from the cell output and **paste
-   it into the chat** (or provide it explicitly).
+**If the trigger script fails** (Chrome session expired, GPU queue timeout, etc.), fall back to manual:
+1. Open the bootstrap notebook: `https://colab.research.google.com/github/allyoushawn/recsys_playground/blob/main/notebooks/ad_hoc/colab_ssh_bootstrap.ipynb`
+2. Connect GPU runtime and Run All.
+3. Paste the `*.trycloudflare.com` hostname from cell output.
 
-Use that value as `<HOSTNAME>`.
-
-Once `<HOSTNAME>` is obtained, verify connectivity:
+Once `<HOSTNAME>` is obtained (automated or manual), verify connectivity:
 
 ```bash
 sshpass -p "cursorssh" ssh <SSH_OPTS> root@<HOSTNAME> \

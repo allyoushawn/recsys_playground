@@ -26,10 +26,12 @@ Requirements:
 """
 
 import asyncio
+import json
 import re
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -49,6 +51,9 @@ CDP_URL = f"http://localhost:{CDP_PORT}"
 RUNTIME_CONNECT_TIMEOUT = 240
 HOSTNAME_WAIT_TIMEOUT = 300
 HOSTNAME_RE = re.compile(r'([\w-]+\.trycloudflare\.com)')
+
+NTFY_TOPIC = "colab-ssh-allyoushawn-e3b76118-69fd-4a29-89c1-c34e07b0977e"
+NTFY_POLL_INTERVAL = 10  # seconds between ntfy.sh polls
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -208,59 +213,30 @@ async def _wait_runtime_connected(ctx):
     raise RuntimeError(f"Runtime did not connect within {RUNTIME_CONNECT_TIMEOUT}s.")
 
 
-async def _hostname_from_frame(frame):
-    """Scan one frame's DOM + open shadow roots for trycloudflare hostname."""
-    try:
-        raw = await frame.evaluate(
-            r"""
-            () => {
-                const re = /[\w-]+\.trycloudflare\.com/;
-                function walk(node) {
-                    if (!node) return null;
-                    if (node.nodeType === 3) {
-                        const m = (node.textContent || '').match(re);
-                        if (m) return m[0];
-                    }
-                    if (node.shadowRoot) {
-                        const r = walk(node.shadowRoot);
-                        if (r) return r;
-                    }
-                    const kids = node.childNodes;
-                    if (kids) {
-                        for (let i = 0; i < kids.length; i++) {
-                            const r = walk(kids[i]);
-                            if (r) return r;
-                        }
-                    }
-                    return null;
-                }
-                const body = document.body;
-                if (!body) return null;
-                return walk(body);
-            }
-            """
-        )
-        if not raw:
-            return None
-        m = HOSTNAME_RE.search(raw)
-        return m.group(1).strip() if m else None
-    except Exception:
-        return None
-
-
-async def _wait_for_hostname(ctx):
-    print(f"[trigger] Waiting for hostname (up to {HOSTNAME_WAIT_TIMEOUT}s)...", file=sys.stderr)
-    deadline = asyncio.get_event_loop().time() + HOSTNAME_WAIT_TIMEOUT
-    while asyncio.get_event_loop().time() < deadline:
-        page = _colab_page(ctx)
-        if page:
-            await _dismiss_trusted_notebook_warning(page)
-            for frame in page.frames:
-                host = await _hostname_from_frame(frame)
-                if host:
-                    return host
-        await asyncio.sleep(5)
-    raise RuntimeError(f"Hostname not found after {HOSTNAME_WAIT_TIMEOUT}s.")
+async def _wait_for_hostname_ntfy(start_epoch: int) -> str:
+    """Poll ntfy.sh for the hostname POSTed by the bootstrap notebook."""
+    import json
+    import urllib.request
+    print(f"[trigger] Polling ntfy.sh for hostname (up to {HOSTNAME_WAIT_TIMEOUT}s)...", file=sys.stderr)
+    deadline = time.time() + HOSTNAME_WAIT_TIMEOUT
+    while time.time() < deadline:
+        try:
+            url = f"https://ntfy.sh/{NTFY_TOPIC}/json?since={start_epoch}&poll=1"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                lines = resp.read().decode().strip().splitlines()
+            for line in reversed(lines):
+                try:
+                    msg = json.loads(line)
+                    hostname = msg.get("message", "").strip()
+                    if HOSTNAME_RE.match(hostname):
+                        print(f"[trigger] Hostname received: {hostname}", file=sys.stderr)
+                        return hostname
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[trigger] ntfy.sh poll error: {e}", file=sys.stderr)
+        await asyncio.sleep(NTFY_POLL_INTERVAL)
+    raise RuntimeError(f"Hostname not received via ntfy.sh after {HOSTNAME_WAIT_TIMEOUT}s.")
 
 
 # ── Setup mode ────────────────────────────────────────────────────────────────
@@ -316,7 +292,13 @@ async def trigger_bootstrap() -> str:
                 raise RuntimeError("Colab page not found after Chrome launch.")
 
             print(f"[trigger] Colab page: {page.url}", file=sys.stderr)
-            await page.wait_for_load_state("networkidle", timeout=60_000)
+            # Colab keeps long-lived connections; "networkidle" often never fires.
+            await page.wait_for_load_state("load", timeout=90_000)
+            await page.wait_for_selector(
+                "colab-connect-button, #connect, colab-toolbar-button",
+                timeout=120_000,
+            )
+            print("[trigger] Colab shell ready (toolbar/connect present).", file=sys.stderr)
 
             page = await _handle_all_modals(ctx, page)
             await _click_connect(page)
@@ -342,6 +324,7 @@ async def trigger_bootstrap() -> str:
             page = await _wait_runtime_connected(ctx)
             page = await _handle_all_modals(ctx, page)
 
+            start_epoch = int(time.time())
             await page.keyboard.press("Control+F9")
             print("[trigger] Running all cells...", file=sys.stderr)
             await asyncio.sleep(3)
@@ -349,7 +332,7 @@ async def trigger_bootstrap() -> str:
             page = _colab_page(ctx) or page
             page = await _handle_all_modals(ctx, page)
 
-            hostname = await _wait_for_hostname(ctx)
+            hostname = await _wait_for_hostname_ntfy(start_epoch)
             await browser.disconnect()
             return hostname
     finally:
