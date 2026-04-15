@@ -362,6 +362,20 @@ async def trigger_bootstrap() -> str:
             browser = await p.chromium.connect_over_cdp(CDP_URL)
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
 
+            # Auto-accept all JS dialogs (alert/confirm/prompt/beforeunload).
+            # "Leave site?" (beforeunload) appears when OAuth tabs close/redirect;
+            # accepting it (clicking Leave) allows the navigation to complete.
+            async def _accept_dialog(dialog):
+                print(f"[trigger] Browser dialog ({dialog.type}): accepting.", file=sys.stderr)
+                await dialog.accept()
+
+            def _attach_dialog_handler(pg):
+                pg.on("dialog", lambda d: asyncio.create_task(_accept_dialog(d)))
+
+            for pg in ctx.pages:
+                _attach_dialog_handler(pg)
+            ctx.on("page", _attach_dialog_handler)
+
             # Find or wait for the Colab page to load
             page = None
             for _ in range(20):
@@ -427,6 +441,12 @@ async def trigger_bootstrap() -> str:
             drive_auth_task = asyncio.create_task(_handle_drive_auth_background(ctx))
             try:
                 hostname = await _wait_for_hostname_ntfy(start_epoch)
+                # Grace period: drive.mount() runs in the next cell and may open a
+                # Google OAuth popup (accounts.google.com/signin/oauth/id) after the
+                # hostname is already received. Keep the auth handler alive so it can
+                # click Continue without human interaction.
+                print("[trigger] Hostname received; waiting for Drive OAuth to complete (60s)...", file=sys.stderr)
+                await asyncio.sleep(60)
             finally:
                 drive_auth_task.cancel()
 
