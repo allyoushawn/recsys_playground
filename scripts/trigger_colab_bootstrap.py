@@ -191,6 +191,30 @@ async def _click_connect(page):
         print("[trigger] Warning: Connect not clicked — may already be connected.", file=sys.stderr)
 
 
+async def _runtime_is_live(page) -> bool:
+    """Return True if the page already shows an active or resuming runtime."""
+    live_selectors = [
+        "colab-usage-display", "text=RAM",
+        "[data-connected='true']", "colab-runtime-status",
+    ]
+    resuming_texts = ["Resuming session", "Connecting", "Initializing"]
+    for sel in live_selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                return True
+        except Exception:
+            pass
+    for text in resuming_texts:
+        try:
+            el = await page.query_selector(f"text={text}")
+            if el and await el.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
 async def _wait_runtime_connected(ctx):
     print(f"[trigger] Waiting for runtime (up to {RUNTIME_CONNECT_TIMEOUT}s)...", file=sys.stderr)
     connected_selectors = [
@@ -359,16 +383,23 @@ async def trigger_bootstrap() -> str:
             print("[trigger] Colab shell ready (toolbar/connect present).", file=sys.stderr)
 
             page = await _handle_all_modals(ctx, page)
-            await _click_connect(page)
-            await asyncio.sleep(2)
 
-            # Handle modals that appear AFTER clicking Connect (sign-in, not-authored)
-            page = _colab_page(ctx) or page
-            page = await _handle_all_modals(ctx, page)
+            # Only click Connect if no runtime is already active/resuming.
+            # Clicking Connect on a resuming session interrupts it and causes delays.
+            if await _runtime_is_live(page):
+                print("[trigger] Runtime already active or resuming — skipping Connect click.", file=sys.stderr)
+            else:
+                await _click_connect(page)
+                await asyncio.sleep(2)
 
-            # Auth redirect may have abandoned the first Connect — retry
-            await _click_connect(page)
-            await asyncio.sleep(2)
+                # Handle modals that appear AFTER clicking Connect (sign-in, not-authored)
+                page = _colab_page(ctx) or page
+                page = await _handle_all_modals(ctx, page)
+
+                # Auth redirect may have abandoned the first Connect — retry
+                if not await _runtime_is_live(page):
+                    await _click_connect(page)
+                    await asyncio.sleep(2)
 
             # T4 GPU picker
             try:
