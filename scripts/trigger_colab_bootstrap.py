@@ -452,7 +452,7 @@ async def trigger_bootstrap() -> str:
 
             return hostname
     finally:
-        chrome_proc.terminate()
+        chrome_proc.kill()  # SIGKILL: force-close Chrome without triggering beforeunload ("Leave site?")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
