@@ -213,6 +213,47 @@ async def _wait_runtime_connected(ctx):
     raise RuntimeError(f"Runtime did not connect within {RUNTIME_CONNECT_TIMEOUT}s.")
 
 
+async def _handle_drive_auth_background(ctx) -> None:
+    """
+    Background task: watch for Google Drive OAuth popup and click Allow.
+
+    drive.mount() in Colab opens an accounts.google.com/o/oauth2 page.
+    Since the Chrome profile is already signed in, clicking Allow completes
+    the auth without user interaction.
+    """
+    ALLOW_RE = re.compile(
+        r"Allow|Continue|確認|授予|Autoriser|Zulassen|Permitir|Consenti",
+        re.I,
+    )
+    seen_urls = set()
+    while True:
+        for pg in list(ctx.pages):
+            url = pg.url
+            if "accounts.google.com" in url and "oauth" in url.lower() and url not in seen_urls:
+                seen_urls.add(url)
+                print(f"[trigger] Drive OAuth popup: {url[:80]}", file=sys.stderr)
+                await asyncio.sleep(2)  # let page settle
+                try:
+                    btn = pg.get_by_role("button", name=ALLOW_RE).first
+                    if await btn.is_visible(timeout=8_000):
+                        await btn.click()
+                        print("[trigger] Drive auth: clicked Allow.", file=sys.stderr)
+                        continue
+                except Exception:
+                    pass
+                # Fallback: try any primary-action button on the page
+                for label in ["Allow", "Continue", "Sign in"]:
+                    try:
+                        b = pg.locator(f"text={label}").first
+                        if await b.is_visible(timeout=2_000):
+                            await b.click()
+                            print(f"[trigger] Drive auth: clicked '{label}'.", file=sys.stderr)
+                            break
+                    except Exception:
+                        pass
+        await asyncio.sleep(3)
+
+
 async def _wait_for_hostname_ntfy(start_epoch: int) -> str:
     """Poll ntfy.sh for the hostname POSTed by the bootstrap notebook."""
     import json
@@ -332,7 +373,15 @@ async def trigger_bootstrap() -> str:
             page = _colab_page(ctx) or page
             page = await _handle_all_modals(ctx, page)
 
-            hostname = await _wait_for_hostname_ntfy(start_epoch)
+            # Run Drive OAuth handler concurrently with hostname polling.
+            # drive.mount() opens an accounts.google.com/oauth popup; the
+            # handler clicks Allow so Drive mounts without user interaction.
+            drive_auth_task = asyncio.create_task(_handle_drive_auth_background(ctx))
+            try:
+                hostname = await _wait_for_hostname_ntfy(start_epoch)
+            finally:
+                drive_auth_task.cancel()
+
             await browser.disconnect()
             return hostname
     finally:
