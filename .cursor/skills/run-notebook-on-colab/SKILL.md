@@ -40,7 +40,7 @@ Gather from the user message or ask if missing:
 | Input | Description | Example |
 |-------|-------------|---------|
 | Notebook path | Relative path to the .ipynb | `notebooks/ad_hoc/experiment_amazon_review_game.ipynb` |
-| Colab hostname | Cloudflared hostname (ask user in Phase 2) | `loud-turkey-abc.trycloudflare.com` |
+| Colab hostname | Auto-fetched via trigger script (Phase 2) | `loud-turkey-abc.trycloudflare.com` |
 
 If the user gives a short name like `experiment_amazon_review_game`, resolve it
 by searching `notebooks/` for a matching `.ipynb` file.
@@ -54,15 +54,28 @@ by searching `notebooks/` for a matching `.ipynb` file.
 2. **Fix any issues found** and tell the user what changed.
 3. No commit/push needed — files are synced via `scp` in Phase 3.
 
-### Phase 2: Connect to Colab
+### Phase 2: Connect to Colab (automated)
 
-Ask the user using the AskQuestion tool or a direct message:
+Run the trigger script to automatically open the bootstrap notebook, allocate
+a GPU runtime, run all cells, and capture the cloudflared hostname:
 
-> Please open `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` in Google Colab
-> and click **Run All**. Once it finishes, paste the cloudflared hostname
-> here (it looks like `xxx-xxx-xxx.trycloudflare.com`).
+```bash
+HOSTNAME=$(python3 scripts/trigger_colab_bootstrap.py)
+```
 
-Once the user provides `<HOSTNAME>`, verify connectivity:
+The script (`scripts/trigger_colab_bootstrap.py`):
+- Launches system Chrome with the existing Google session (no login required)
+- Opens `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` via its GitHub URL
+- Connects to a GPU runtime (waits up to 3 min for allocation)
+- Runs all cells (`Ctrl+F9`)
+- Waits for the `trycloudflare.com` hostname in cell output
+- Prints the hostname to stdout
+
+**If the script fails** (e.g. Google auth challenge, runtime quota exceeded),
+fall back to manual: ask the user to open the bootstrap notebook and paste the
+hostname.
+
+Once `<HOSTNAME>` is obtained, verify connectivity:
 
 ```bash
 sshpass -p "cursorssh" ssh <SSH_OPTS> root@<HOSTNAME> \
