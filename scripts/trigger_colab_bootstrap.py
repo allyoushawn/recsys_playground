@@ -175,26 +175,56 @@ async def _wait_runtime_connected(ctx):
     raise RuntimeError(f"Runtime did not connect within {RUNTIME_CONNECT_TIMEOUT}s.")
 
 
+async def _hostname_from_frame(frame):
+    """Scan one frame's DOM + open shadow roots for trycloudflare hostname."""
+    try:
+        raw = await frame.evaluate(
+            r"""
+            () => {
+                const re = /[\w-]+\.trycloudflare\.com/;
+                function walk(node) {
+                    if (!node) return null;
+                    if (node.nodeType === 3) {
+                        const m = (node.textContent || '').match(re);
+                        if (m) return m[0];
+                    }
+                    if (node.shadowRoot) {
+                        const r = walk(node.shadowRoot);
+                        if (r) return r;
+                    }
+                    const kids = node.childNodes;
+                    if (kids) {
+                        for (let i = 0; i < kids.length; i++) {
+                            const r = walk(kids[i]);
+                            if (r) return r;
+                        }
+                    }
+                    return null;
+                }
+                const body = document.body;
+                if (!body) return null;
+                return walk(body);
+            }
+            """
+        )
+        if not raw:
+            return None
+        m = HOSTNAME_RE.search(raw)
+        return m.group(1).strip() if m else None
+    except Exception:
+        return None
+
+
 async def _wait_for_hostname(ctx):
     print(f"[trigger] Waiting for hostname (up to {HOSTNAME_WAIT_TIMEOUT}s)...", file=sys.stderr)
     deadline = asyncio.get_event_loop().time() + HOSTNAME_WAIT_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         page = _colab_page(ctx)
         if page:
-            try:
-                content = await page.evaluate("""
-                    () => {
-                        const nodes = document.querySelectorAll(
-                            '.output_text, .output_subarea, .cell-output-text, pre, output'
-                        );
-                        return Array.from(nodes).map(n => n.textContent).join('\\n');
-                    }
-                """)
-                m = HOSTNAME_RE.search(content)
-                if m:
-                    return m.group(1).strip()
-            except Exception:
-                pass
+            for frame in page.frames:
+                host = await _hostname_from_frame(frame)
+                if host:
+                    return host
         await asyncio.sleep(5)
     raise RuntimeError(f"Hostname not found after {HOSTNAME_WAIT_TIMEOUT}s.")
 
