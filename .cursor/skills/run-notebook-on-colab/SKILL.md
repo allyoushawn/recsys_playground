@@ -54,24 +54,25 @@ by searching `notebooks/` for a matching `.ipynb` file.
 2. **Fix any issues found** and tell the user what changed.
 3. No commit/push needed — files are synced via `scp` in Phase 3.
 
-### Phase 2: Connect to Colab (manual bootstrap — default)
-
-**Do not** rely on `scripts/trigger_colab_bootstrap.py` for the default skill path
-(Playwright/CDP automation proved too brittle: Colab UI locale, Drive consent,
-`networkidle`, long GPU waits, and hostname timing). The script remains in the
-repo for **optional** experiments only.
+### Phase 2: Connect to Colab (hostname via ntfy.sh)
 
 Ask the user to:
 
-1. Open the bootstrap notebook in Colab (same repo path on **GitHub** so Colab
-   sees the latest committed notebook):
+1. Open the bootstrap notebook in Colab:
    - `https://colab.research.google.com/github/allyoushawn/recsys_playground/blob/main/notebooks/ad_hoc/colab_ssh_bootstrap.ipynb`
-2. **Connect** a GPU (or T4) runtime and **Run all** (or run cells until the
-   colab-ssh cell prints the tunnel line).
-3. **Copy the `*.trycloudflare.com` hostname** from the cell output and **paste
-   it into the chat** (or provide it explicitly).
+2. **Connect** a GPU (or T4) runtime and **Run all**.
+3. Wait — the notebook will relay the hostname automatically. No paste needed.
 
-Use that value as `<HOSTNAME>`.
+Once the user confirms they've clicked Run All, poll ntfy.sh for the hostname (up to 5 min, 20s intervals):
+
+```bash
+curl -s "https://ntfy.sh/colab-ssh-allyoushawn-e3b76118-69fd-4a29-89c1-c34e07b0977e/json?since=15m&poll=1" | \
+  python3 -c "import sys,json; msgs=[json.loads(l) for l in sys.stdin if l.strip()]; print(msgs[-1]['message'] if msgs else '')"
+```
+
+If the poll returns empty after 5 min, fall back: ask the user to paste the hostname from the cell output.
+
+Use the returned value as `<HOSTNAME>`.
 
 Once `<HOSTNAME>` is obtained, verify connectivity:
 
