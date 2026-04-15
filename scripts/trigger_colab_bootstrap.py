@@ -215,11 +215,13 @@ async def _wait_runtime_connected(ctx):
 
 async def _handle_drive_auth_background(ctx) -> None:
     """
-    Background task: watch for Google Drive OAuth popup and click Allow.
+    Background task: handle all Drive authorization dialogs.
 
-    drive.mount() in Colab opens an accounts.google.com/o/oauth2 page.
-    Since the Chrome profile is already signed in, clicking Allow completes
-    the auth without user interaction.
+    Two forms:
+    1. Inline Colab dialog — "Permit this notebook to access your Google Drive
+       files?" with a "Connect to Google Drive" button (appears on the Colab page).
+    2. Google OAuth popup tab — accounts.google.com/o/oauth2 with an Allow button
+       (opened after clicking the inline dialog, if credentials need re-consent).
     """
     ALLOW_RE = re.compile(
         r"Allow|Continue|確認|授予|Autoriser|Zulassen|Permitir|Consenti",
@@ -227,31 +229,46 @@ async def _handle_drive_auth_background(ctx) -> None:
     )
     seen_urls = set()
     while True:
+        # ── 1. Inline Colab "Connect to Google Drive" dialog ──────────────────
+        colab_page = _colab_page(ctx)
+        if colab_page:
+            for label in ["Connect to Google Drive", "连接到 Google Drive", "連接至 Google 雲端硬碟"]:
+                try:
+                    btn = colab_page.get_by_role("button", name=re.compile(label, re.I)).first
+                    if await btn.is_visible(timeout=500):
+                        print(f"[trigger] Drive inline dialog: clicking '{label}'.", file=sys.stderr)
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        break
+                except Exception:
+                    pass
+
+        # ── 2. OAuth popup tab (accounts.google.com/o/oauth2) ─────────────────
         for pg in list(ctx.pages):
             url = pg.url
             if "accounts.google.com" in url and "oauth" in url.lower() and url not in seen_urls:
                 seen_urls.add(url)
-                print(f"[trigger] Drive OAuth popup: {url[:80]}", file=sys.stderr)
+                print(f"[trigger] Drive OAuth tab: {url[:80]}", file=sys.stderr)
                 await asyncio.sleep(2)  # let page settle
                 try:
                     btn = pg.get_by_role("button", name=ALLOW_RE).first
                     if await btn.is_visible(timeout=8_000):
                         await btn.click()
-                        print("[trigger] Drive auth: clicked Allow.", file=sys.stderr)
+                        print("[trigger] Drive OAuth: clicked Allow.", file=sys.stderr)
                         continue
                 except Exception:
                     pass
-                # Fallback: try any primary-action button on the page
                 for label in ["Allow", "Continue", "Sign in"]:
                     try:
                         b = pg.locator(f"text={label}").first
                         if await b.is_visible(timeout=2_000):
                             await b.click()
-                            print(f"[trigger] Drive auth: clicked '{label}'.", file=sys.stderr)
+                            print(f"[trigger] Drive OAuth: clicked '{label}'.", file=sys.stderr)
                             break
                     except Exception:
                         pass
-        await asyncio.sleep(3)
+
+        await asyncio.sleep(2)
 
 
 async def _wait_for_hostname_ntfy(start_epoch: int) -> str:
@@ -382,7 +399,6 @@ async def trigger_bootstrap() -> str:
             finally:
                 drive_auth_task.cancel()
 
-            await browser.disconnect()
             return hostname
     finally:
         chrome_proc.terminate()
