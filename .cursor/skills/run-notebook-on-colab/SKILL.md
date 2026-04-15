@@ -64,7 +64,7 @@ HOSTNAME=$(python3 scripts/trigger_colab_bootstrap.py)
 ```
 
 The script (`scripts/trigger_colab_bootstrap.py`):
-- Launches system Chrome with the existing Google session (no login required)
+- Launches system Chrome with **`~/.colab_chrome_profile`** over CDP (run **`--setup`** once if that profile is not signed in)
 - Opens `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` via its GitHub URL
 - Connects to a GPU runtime (waits up to 3 min for allocation)
 - Runs all cells (`Ctrl+F9`)
