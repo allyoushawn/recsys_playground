@@ -278,63 +278,39 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
         print("[trigger] Opened Connect dropdown.", file=sys.stderr)
         await asyncio.sleep(0.8)
 
-        # ── Step 2: click "Change runtime type" in the dropdown ───────────────
-        # Menu items may live inside shadow DOM — use recursive JS traversal.
-        async def _click_menu_item(label: str) -> bool:
-            return await page.evaluate(f"""() => {{
-                function clickByText(root, text) {{
-                    for (const el of root.querySelectorAll('*')) {{
-                        if (el.shadowRoot) {{
-                            if (clickByText(el.shadowRoot, text)) return true;
-                        }}
-                        if (el.children.length === 0 && el.textContent.trim() === text) {{
-                            const r = el.getBoundingClientRect();
-                            if (r.width > 0 && r.height > 0) {{
-                                el.click();
-                                return true;
-                            }}
-                        }}
-                    }}
-                    return false;
-                }}
-                return clickByText(document, {repr(label)});
-            }}""")
-
-        clicked = await _click_menu_item("Change runtime type")
-        if not clicked:
-            # Fallback: try regular Playwright locator
-            change_rt = page.locator("text=Change runtime type").first
-            if await change_rt.is_visible(timeout=3_000):
-                await change_rt.click()
-                clicked = True
-
-        if not clicked:
+        # ── Step 2: click "Change runtime type" in the dropdown ──────────────
+        # get_by_role uses the accessibility tree which pierces shadow DOM.
+        change_rt = page.get_by_role("menuitem", name="Change runtime type")
+        try:
+            await change_rt.click(timeout=5_000)
+            print("[trigger] Clicked 'Change runtime type'.", file=sys.stderr)
+        except Exception:
             await page.keyboard.press("Escape")
-            print("[trigger] 'Change runtime type' not found in dropdown.", file=sys.stderr)
+            print("[trigger] 'Change runtime type' menuitem not found.", file=sys.stderr)
             return False
-        print("[trigger] Clicked 'Change runtime type'.", file=sys.stderr)
         await asyncio.sleep(1.5)
 
-        # ── Step 3: click the radio button for the requested GPU type ─────────
-        # Colab renders these as <label> elements containing the option text.
-        # Clicking the label selects the associated radio input.
-        radio_label = page.locator(f"label:has-text('{gpu_type}')").first
-        if not await radio_label.is_visible(timeout=5_000):
+        # ── Step 3: select the GPU radio button ───────────────────────────────
+        # The dialog radio buttons are accessible by name via the accessibility tree.
+        radio = page.get_by_role("radio", name=gpu_type)
+        try:
+            await radio.click(timeout=5_000)
+            print(f"[trigger] Selected radio: {gpu_type}.", file=sys.stderr)
+        except Exception:
             await page.keyboard.press("Escape")
-            print(f"[trigger] '{gpu_type}' radio option not visible — check account tier.", file=sys.stderr)
+            print(f"[trigger] '{gpu_type}' radio not found — check account tier.", file=sys.stderr)
             return False
-        await radio_label.click()
-        print(f"[trigger] Selected radio: {gpu_type}.", file=sys.stderr)
         await asyncio.sleep(0.5)
 
         # ── Step 4: click Save ────────────────────────────────────────────────
-        save_btn = page.locator("text=Save").first
-        if not await save_btn.is_visible(timeout=5_000):
+        save_btn = page.get_by_role("button", name="Save")
+        try:
+            await save_btn.click(timeout=5_000)
+            print(f"[trigger] Runtime type saved ({gpu_type}).", file=sys.stderr)
+        except Exception:
             await page.keyboard.press("Escape")
-            print("[trigger] Save button not found in runtime type dialog.", file=sys.stderr)
+            print("[trigger] Save button not found.", file=sys.stderr)
             return False
-        await save_btn.click()
-        print(f"[trigger] Runtime type saved ({gpu_type}).", file=sys.stderr)
         await asyncio.sleep(1.5)
         return True
 
