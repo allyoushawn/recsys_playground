@@ -202,32 +202,22 @@ async def _handle_all_modals(ctx, page):
 
 
 async def _click_connect(page):
-    # Prefer clicking the main connect button inside colab-connect-button's shadow DOM
-    # (not the ▼ dropdown arrow which has aria-haspopup).
-    clicked = await page.evaluate("""() => {
-        const host = document.querySelector('colab-connect-button');
-        if (!host || !host.shadowRoot) return false;
-        const btns = Array.from(host.shadowRoot.querySelectorAll('button, [role="button"]'));
-        // Click the button WITHOUT aria-haspopup (the main Connect, not the chevron)
-        const main = btns.find(b => !b.getAttribute('aria-haspopup')) || btns[0];
-        if (!main) return false;
-        main.click();
-        return true;
-    }""")
-    if clicked:
-        print("[trigger] Clicked Connect (shadow DOM main button).", file=sys.stderr)
-        return
-
-    for selector, label in [("#connect", "#connect")]:
+    # Click the colab-connect-button element directly (center of element lands on
+    # the "Connect" text area, not the ▼ chevron). This is the approach that
+    # worked reliably for T4 GPU connections.
+    for selector, label in [
+        ("colab-connect-button", "colab-connect-button"),
+        ("#connect", "#connect"),
+    ]:
         try:
             btn = page.locator(selector).first
-            await btn.click(timeout=5_000)
+            await btn.click(timeout=8_000)
             print(f"[trigger] Clicked {label}.", file=sys.stderr)
             return
         except Exception:
             pass
     try:
-        btn = page.get_by_role("button", name=re.compile(r"^Connect$", re.I)).first
+        btn = page.get_by_role("button", name=re.compile(r"Connect", re.I)).first
         await btn.click(timeout=5_000)
         print("[trigger] Clicked Connect (ARIA role).", file=sys.stderr)
     except Exception:
