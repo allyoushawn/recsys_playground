@@ -294,12 +294,49 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
         await asyncio.sleep(1.5)
 
         # ── Step 3: select the GPU radio button ───────────────────────────────
-        # The dialog radio buttons are accessible by name via the accessibility tree.
-        radio = page.get_by_role("radio", name=gpu_type)
-        try:
-            await radio.click(timeout=5_000)
-            print(f"[trigger] Selected radio: {gpu_type}.", file=sys.stderr)
-        except Exception:
+        # Try multiple locator strategies since the label text may include extra
+        # content (compute unit badges, Pro+ markers) that breaks exact matching.
+        selected = False
+        for locator in [
+            page.get_by_role("radio", name=re.compile(re.escape(gpu_type), re.I)),
+            page.locator("label").filter(has_text=gpu_type),
+            page.get_by_text(gpu_type, exact=True),
+            page.locator(f"text={gpu_type}"),
+        ]:
+            try:
+                if await locator.first.is_visible(timeout=3_000):
+                    await locator.first.click()
+                    print(f"[trigger] Selected radio: {gpu_type}.", file=sys.stderr)
+                    selected = True
+                    break
+            except Exception:
+                pass
+
+        if not selected:
+            # Last resort: JS click by text content traversing shadow DOM
+            clicked = await page.evaluate(f"""() => {{
+                function findByText(root, text) {{
+                    for (const el of root.querySelectorAll('*')) {{
+                        if (el.shadowRoot) {{
+                            const f = findByText(el.shadowRoot, text);
+                            if (f) return f;
+                        }}
+                        if (el.textContent.trim() === text) {{
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) return el;
+                        }}
+                    }}
+                    return null;
+                }}
+                const el = findByText(document, {repr(gpu_type)});
+                if (el) {{ el.click(); return true; }}
+                return false;
+            }}""")
+            if clicked:
+                print(f"[trigger] Selected radio via JS text search: {gpu_type}.", file=sys.stderr)
+                selected = True
+
+        if not selected:
             await page.keyboard.press("Escape")
             print(f"[trigger] '{gpu_type}' radio not found — check account tier.", file=sys.stderr)
             return False
