@@ -91,6 +91,18 @@ def _launch_chrome(url: str) -> subprocess.Popen:
             lock_path.unlink()
             print(f"[trigger] Removed stale {lock}.", file=sys.stderr)
 
+    # Mark the previous session as clean so Chrome skips the "Restore page?" infobar.
+    # SIGKILL leaves exit_type="Crashed"; patching it to "Normal" suppresses the prompt.
+    local_state = COLAB_PROFILE / "Local State"
+    if local_state.exists():
+        try:
+            state = json.loads(local_state.read_text())
+            for profile_name in state.get("profile", {}).get("info_cache", {}):
+                state["profile"]["info_cache"][profile_name]["exit_type"] = "Normal"
+            local_state.write_text(json.dumps(state))
+        except Exception as e:
+            print(f"[trigger] Could not patch Local State: {e}", file=sys.stderr)
+
     cmd = [
         CHROME_BIN,
         f"--remote-debugging-port={CDP_PORT}",
@@ -285,16 +297,31 @@ async def _handle_drive_auth_background(ctx) -> None:
                 except Exception:
                     pass
 
-        # ── 3. Colab Secrets access dialog ────────────────────────────────────
+        # ── 3. Colab Secrets dialogs ──────────────────────────────────────────
+        # Two forms:
+        # a) "Share notebook" warning (appears when userdata.get() is called on a
+        #    GitHub-URL notebook) — has an OK button and "secret" or "Share" text.
+        # b) Per-secret "Grant access" prompt — has a "Grant access" button.
         if colab_page:
-            for label in ["Grant access", "Allow", "OK"]:
+            # Form a: "Share notebook" modal with OK
+            try:
+                share_title = colab_page.locator("text=Share notebook").first
+                if await share_title.is_visible(timeout=500):
+                    ok_btn = colab_page.get_by_role("button", name=re.compile(r"^ok$", re.I)).first
+                    if await ok_btn.is_visible(timeout=2_000):
+                        print("[trigger] Secrets 'Share notebook' warning: clicking OK.", file=sys.stderr)
+                        await ok_btn.click()
+                        await asyncio.sleep(1)
+            except Exception:
+                pass
+            # Form b: per-secret Grant access prompt
+            for label in ["Grant access", "Allow"]:
                 try:
                     btn = colab_page.get_by_role("button", name=re.compile(label, re.I)).first
                     if await btn.is_visible(timeout=500):
-                        # Only click if a secrets-related prompt is visible
                         secrets_hint = colab_page.locator("text=secret").first
                         if await secrets_hint.is_visible(timeout=500):
-                            print(f"[trigger] Colab secrets dialog: clicking '{label}'.", file=sys.stderr)
+                            print(f"[trigger] Colab secrets grant dialog: clicking '{label}'.", file=sys.stderr)
                             await btn.click()
                             await asyncio.sleep(1)
                             break
