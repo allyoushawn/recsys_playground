@@ -308,22 +308,36 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
         # ── Step 3b: handle "Disconnect and delete runtime" confirmation ───────
         # When an existing runtime is active and the GPU type changes, Colab
         # overlays a confirmation before showing Save. Click OK to proceed.
-        # The dialog appears asynchronously — wait up to 8s for it.
+        # Poll for up to 8s since the dialog appears asynchronously.
         confirmed = False
-        for ok_locator in [
-            page.locator("text=OK").last,
-            page.get_by_text("OK", exact=True).last,
-            page.get_by_role("button", name="OK"),
-        ]:
-            try:
-                if await ok_locator.is_visible(timeout=8_000):
-                    await ok_locator.click()
-                    print("[trigger] Confirmed 'Disconnect and delete runtime' → OK.", file=sys.stderr)
-                    await asyncio.sleep(1.5)
-                    confirmed = True
-                    break
-            except Exception:
-                pass
+        deadline = asyncio.get_event_loop().time() + 8
+        while asyncio.get_event_loop().time() < deadline:
+            clicked = await page.evaluate("""() => {
+                // Recursively search shadow DOMs for a visible button with text 'OK'
+                function findOK(root) {
+                    for (const el of root.querySelectorAll('*')) {
+                        if (el.shadowRoot) {
+                            const found = findOK(el.shadowRoot);
+                            if (found) return found;
+                        }
+                        if ((el.tagName === 'BUTTON' || el.getAttribute('role') === 'button') &&
+                            el.textContent.trim() === 'OK') {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) return el;
+                        }
+                    }
+                    return null;
+                }
+                const btn = findOK(document);
+                if (btn) { btn.click(); return true; }
+                return false;
+            }""")
+            if clicked:
+                print("[trigger] Confirmed 'Disconnect and delete runtime' → OK.", file=sys.stderr)
+                await asyncio.sleep(1.5)
+                confirmed = True
+                break
+            await asyncio.sleep(0.5)
         if not confirmed:
             print("[trigger] No disconnect confirmation dialog — continuing.", file=sys.stderr)
 
