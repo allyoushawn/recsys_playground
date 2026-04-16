@@ -361,43 +361,46 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
                 return hasText(document, 'Disconnect and delete runtime');
             }""")
             if dialog_visible:
-                # Dump all visible buttons so we can see exactly what's in the DOM
+                await page.screenshot(path="/tmp/colab_disconnect_dialog.png")
+                # Traverse shadow DOMs to find all visible buttons including those
+                # inside web components (the OK button is in a shadow DOM dialog).
                 dom_info = await page.evaluate("""() => {
                     const results = [];
-                    document.querySelectorAll('*').forEach(el => {
-                        const r = el.getBoundingClientRect();
-                        if (r.width > 5 && r.height > 5 &&
-                            (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ||
-                             el.tagName.includes('-BUTTON') || el.tagName.includes('BUTTON'))) {
-                            results.push({
-                                tag: el.tagName,
-                                text: el.textContent.trim().slice(0, 40),
-                                x: Math.round(r.x), y: Math.round(r.y),
-                                w: Math.round(r.width), h: Math.round(r.height),
-                                role: el.getAttribute('role'),
-                                type: el.getAttribute('type'),
-                            });
+                    function scan(root) {
+                        for (const el of root.querySelectorAll('*')) {
+                            if (el.shadowRoot) scan(el.shadowRoot);
+                            const tag = el.tagName || '';
+                            if (tag === 'BUTTON' || tag.includes('BUTTON') ||
+                                el.getAttribute('role') === 'button') {
+                                const r = el.getBoundingClientRect();
+                                if (r.width > 5 && r.height > 5) {
+                                    results.push({
+                                        tag: tag,
+                                        text: el.textContent.trim().slice(0, 40),
+                                        x: Math.round(r.x), y: Math.round(r.y),
+                                        w: Math.round(r.width), h: Math.round(r.height),
+                                    });
+                                }
+                            }
                         }
-                    });
+                    }
+                    scan(document);
                     return results;
                 }""")
-                print(f"[trigger] Disconnect dialog — visible buttons: {dom_info}", file=sys.stderr)
-                await page.screenshot(path="/tmp/colab_disconnect_dialog.png")
-                print("[trigger] Screenshot saved to /tmp/colab_disconnect_dialog.png", file=sys.stderr)
+                print(f"[trigger] Disconnect dialog — visible buttons (incl shadow DOM): {dom_info}", file=sys.stderr)
 
-                # Click OK by coordinates: find rightmost button among dialog buttons
-                if dom_info:
-                    # OK is rightmost (highest x). Filter to buttons with short text (Cancel/OK)
-                    short_btns = [b for b in dom_info if len(b['text']) <= 10]
-                    if short_btns:
-                        ok_btn = max(short_btns, key=lambda b: b['x'])
-                        print(f"[trigger] Clicking rightmost button: {ok_btn}", file=sys.stderr)
-                        await page.mouse.click(ok_btn['x'] + ok_btn['w'] // 2,
-                                               ok_btn['y'] + ok_btn['h'] // 2)
-                    else:
-                        # Fallback keyboard
-                        await page.keyboard.press("Enter")
+                # Find the OK button specifically — text 'OK', rightmost among short-text buttons
+                short_btns = [b for b in dom_info if b['text'] in ('OK', 'Ok', 'ok')]
+                if not short_btns:
+                    # Fallback: rightmost button with text ≤ 4 chars that isn't blank
+                    short_btns = [b for b in dom_info if 1 <= len(b['text']) <= 4]
+                if short_btns:
+                    ok_btn = max(short_btns, key=lambda b: b['x'])
+                    print(f"[trigger] Clicking OK button: {ok_btn}", file=sys.stderr)
+                    await page.mouse.click(ok_btn['x'] + ok_btn['w'] // 2,
+                                           ok_btn['y'] + ok_btn['h'] // 2)
                 else:
+                    print("[trigger] OK button not found in shadow DOM scan — pressing Enter.", file=sys.stderr)
                     await page.keyboard.press("Enter")
 
                 await asyncio.sleep(1.5)
