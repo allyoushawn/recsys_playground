@@ -357,6 +357,19 @@ async def _runtime_is_live(page) -> bool:
                 return True
         except Exception:
             pass
+    # Also check the connect button's shadow DOM text — "Connecting" appears
+    # inside the shadow root when a GPU runtime is provisioning.
+    try:
+        btn_text = await page.evaluate("""() => {
+            const host = document.querySelector('colab-connect-button');
+            if (!host || !host.shadowRoot) return '';
+            const btn = host.shadowRoot.querySelector('button');
+            return btn ? btn.textContent.trim().toLowerCase() : '';
+        }""")
+        if btn_text and btn_text != "connect":
+            return True  # e.g. "connecting", "initializing", "reconnecting"
+    except Exception:
+        pass
     return False
 
 
