@@ -221,11 +221,11 @@ async def _click_connect(page):
         print("[trigger] Warning: Connect not clicked — may already be connected.", file=sys.stderr)
 
 
-async def _set_runtime_type_gpu(page) -> bool:
-    """Navigate Runtime → Change runtime type → select T4 GPU → Save.
+async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
+    """Navigate Runtime → Change runtime type → select gpu_type → Save.
 
-    Returns True if the runtime type was changed, False if it was already set
-    or if the dialog could not be navigated.
+    Returns True if the runtime type was set, False if the dialog could not
+    be navigated or the requested option wasn't found.
     """
     try:
         # Open the Runtime menu in the top menubar
@@ -239,42 +239,48 @@ async def _set_runtime_type_gpu(page) -> bool:
         # Click "Change runtime type"
         change_rt = page.locator("text=Change runtime type").first
         if not await change_rt.is_visible(timeout=5_000):
-            # Dismiss menu and bail
             await page.keyboard.press("Escape")
             print("[trigger] 'Change runtime type' not found — skipping.", file=sys.stderr)
             return False
         await change_rt.click()
         await asyncio.sleep(1)
 
-        # The dialog has a hardware accelerator selector. Try to find and click T4 GPU.
-        # Colab renders this as a <select> or a list of options.
+        selected = False
+
+        # Try <select> approach first (Colab sometimes renders as native select)
         try:
-            # Try <select> approach first
             select_el = page.locator("select").first
             if await select_el.is_visible(timeout=3_000):
-                await select_el.select_option(label="T4 GPU")
-                print("[trigger] Selected T4 GPU via <select>.", file=sys.stderr)
+                await select_el.select_option(label=gpu_type)
+                print(f"[trigger] Selected {gpu_type} via <select>.", file=sys.stderr)
+                selected = True
         except Exception:
             pass
 
-        # Also try clicking a visible "T4 GPU" label/option in case it's a custom widget
-        try:
-            t4_opt = page.locator("text=T4 GPU").first
-            if await t4_opt.is_visible(timeout=3_000):
-                await t4_opt.click()
-                print("[trigger] Selected T4 GPU via label click.", file=sys.stderr)
-        except Exception:
-            pass
+        # Fallback: click a visible label/option in a custom widget
+        if not selected:
+            try:
+                opt = page.locator(f"text={gpu_type}").first
+                if await opt.is_visible(timeout=3_000):
+                    await opt.click()
+                    print(f"[trigger] Selected {gpu_type} via label click.", file=sys.stderr)
+                    selected = True
+            except Exception:
+                pass
+
+        if not selected:
+            await page.keyboard.press("Escape")
+            print(f"[trigger] Could not find '{gpu_type}' option in dialog.", file=sys.stderr)
+            return False
 
         # Click Save
         save_btn = page.locator("text=Save").first
         if await save_btn.is_visible(timeout=5_000):
             await save_btn.click()
-            print("[trigger] Runtime type saved (T4 GPU).", file=sys.stderr)
+            print(f"[trigger] Runtime type saved ({gpu_type}).", file=sys.stderr)
             await asyncio.sleep(2)
             return True
 
-        # Couldn't find Save — dismiss
         await page.keyboard.press("Escape")
         print("[trigger] Save button not found in runtime type dialog.", file=sys.stderr)
         return False
@@ -474,7 +480,7 @@ def run_setup():
 
 # ── Normal run ────────────────────────────────────────────────────────────────
 
-async def trigger_bootstrap() -> str:
+async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
     if not COLAB_PROFILE.exists():
         raise RuntimeError(
             f"Profile not found at {COLAB_PROFILE}.\n"
@@ -531,7 +537,7 @@ async def trigger_bootstrap() -> str:
             if await _runtime_is_live(page):
                 print("[trigger] Runtime already active or resuming — skipping Connect click.", file=sys.stderr)
             else:
-                await _set_runtime_type_gpu(page)
+                await _set_runtime_type_gpu(page, gpu_type=gpu_type)
 
                 await _click_connect(page)
                 await asyncio.sleep(2)
@@ -593,12 +599,20 @@ async def trigger_bootstrap() -> str:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    if "--setup" in sys.argv:
+    import argparse
+    parser = argparse.ArgumentParser(description="Trigger Colab SSH bootstrap")
+    parser.add_argument("--setup", action="store_true", help="One-time Google login setup")
+    parser.add_argument("--gpu", default="T4 GPU", metavar="TYPE",
+                        help="Hardware accelerator label as shown in Colab (default: 'T4 GPU'). "
+                             "Examples: 'T4 GPU', 'L4 GPU', 'A100 GPU', 'None'")
+    args = parser.parse_args()
+
+    if args.setup:
         run_setup()
         sys.exit(0)
 
     try:
-        hostname = asyncio.run(trigger_bootstrap())
+        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu))
         print(hostname)
         sys.exit(0)
     except Exception as e:
