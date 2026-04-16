@@ -361,40 +361,45 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
                 return hasText(document, 'Disconnect and delete runtime');
             }""")
             if dialog_visible:
-                print("[trigger] Disconnect confirmation dialog detected — attempting to click OK.", file=sys.stderr)
-                # Try JS: find any visible element with text 'OK' and dispatch a click
-                js_clicked = await page.evaluate("""() => {
-                    const all = Array.from(document.querySelectorAll('*'));
-                    const candidates = all.filter(el => {
-                        if (el.textContent.trim() !== 'OK') return false;
+                # Dump all visible buttons so we can see exactly what's in the DOM
+                dom_info = await page.evaluate("""() => {
+                    const results = [];
+                    document.querySelectorAll('*').forEach(el => {
                         const r = el.getBoundingClientRect();
-                        return r.width > 5 && r.height > 5;
+                        if (r.width > 5 && r.height > 5 &&
+                            (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ||
+                             el.tagName.includes('-BUTTON') || el.tagName.includes('BUTTON'))) {
+                            results.push({
+                                tag: el.tagName,
+                                text: el.textContent.trim().slice(0, 40),
+                                x: Math.round(r.x), y: Math.round(r.y),
+                                w: Math.round(r.width), h: Math.round(r.height),
+                                role: el.getAttribute('role'),
+                                type: el.getAttribute('type'),
+                            });
+                        }
                     });
-                    if (!candidates.length) return false;
-                    // Click the last candidate (rightmost = OK, not Cancel)
-                    const btn = candidates[candidates.length - 1];
-                    btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                    btn.click();
-                    return true;
+                    return results;
                 }""")
-                if js_clicked:
-                    print("[trigger] Clicked OK via JS dispatchEvent.", file=sys.stderr)
-                else:
-                    # Keyboard fallback: try Enter (primary action may have focus),
-                    # then Shift+Tab+Enter (navigate back from Cancel to OK)
-                    await page.keyboard.press("Enter")
-                    await asyncio.sleep(0.3)
-                    # If Enter hit Cancel (dialog gone) or did nothing, try Shift+Tab
-                    still_visible = await page.evaluate("""() =>
-                        document.body.textContent.includes('Disconnect and delete runtime')
-                    """)
-                    if still_visible:
-                        await page.keyboard.press("Shift+Tab")
-                        await asyncio.sleep(0.2)
-                        await page.keyboard.press("Enter")
-                        print("[trigger] Used Shift+Tab+Enter for OK.", file=sys.stderr)
+                print(f"[trigger] Disconnect dialog — visible buttons: {dom_info}", file=sys.stderr)
+                await page.screenshot(path="/tmp/colab_disconnect_dialog.png")
+                print("[trigger] Screenshot saved to /tmp/colab_disconnect_dialog.png", file=sys.stderr)
+
+                # Click OK by coordinates: find rightmost button among dialog buttons
+                if dom_info:
+                    # OK is rightmost (highest x). Filter to buttons with short text (Cancel/OK)
+                    short_btns = [b for b in dom_info if len(b['text']) <= 10]
+                    if short_btns:
+                        ok_btn = max(short_btns, key=lambda b: b['x'])
+                        print(f"[trigger] Clicking rightmost button: {ok_btn}", file=sys.stderr)
+                        await page.mouse.click(ok_btn['x'] + ok_btn['w'] // 2,
+                                               ok_btn['y'] + ok_btn['h'] // 2)
                     else:
-                        print("[trigger] Enter confirmed the dialog.", file=sys.stderr)
+                        # Fallback keyboard
+                        await page.keyboard.press("Enter")
+                else:
+                    await page.keyboard.press("Enter")
+
                 await asyncio.sleep(1.5)
                 confirmed = True
                 break
