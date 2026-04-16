@@ -345,11 +345,12 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
         # ── Step 3b: handle "Disconnect and delete runtime" confirmation ───────
         # When an existing runtime is active and the GPU type changes, Colab
         # overlays a confirmation before showing Save. Detect it and click OK.
-        # The dialog may take a moment to appear after the radio click.
+        # IMPORTANT: detect by the unique body text "Are you sure you want to
+        # continue?" — NOT the title, which also appears as a menu item in the
+        # Connect dropdown and would always give a false positive.
         confirmed = False
         deadline = asyncio.get_event_loop().time() + 6
         while asyncio.get_event_loop().time() < deadline:
-            # Check if the confirmation dialog is visible by looking for its title text
             dialog_visible = await page.evaluate("""() => {
                 function hasText(root, text) {
                     for (const el of root.querySelectorAll('*')) {
@@ -358,51 +359,45 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
                     }
                     return false;
                 }
-                return hasText(document, 'Disconnect and delete runtime');
+                // Use unique body text — the title "Disconnect and delete runtime"
+                // also appears as a menu item and gives false positives.
+                return hasText(document, 'Are you sure you want to continue');
             }""")
             if dialog_visible:
                 await page.screenshot(path="/tmp/colab_disconnect_dialog.png")
-                # Traverse shadow DOMs to find all visible buttons including those
-                # inside web components (the OK button is in a shadow DOM dialog).
-                dom_info = await page.evaluate("""() => {
-                    const results = [];
-                    function scan(root) {
+                print("[trigger] Disconnect confirmation detected — clicking OK by dialog coordinates.", file=sys.stderr)
+                # Find the dialog container by its unique body text, then click the
+                # bottom-right area (where OK lives). This avoids shadow DOM button hunting.
+                dialog_box = await page.evaluate("""() => {
+                    function findBox(root, text) {
                         for (const el of root.querySelectorAll('*')) {
-                            if (el.shadowRoot) scan(el.shadowRoot);
-                            const tag = el.tagName || '';
-                            if (tag === 'BUTTON' || tag.includes('BUTTON') ||
-                                el.getAttribute('role') === 'button') {
-                                const r = el.getBoundingClientRect();
-                                if (r.width > 5 && r.height > 5) {
-                                    results.push({
-                                        tag: tag,
-                                        text: el.textContent.trim().slice(0, 40),
-                                        x: Math.round(r.x), y: Math.round(r.y),
-                                        w: Math.round(r.width), h: Math.round(r.height),
-                                    });
+                            if (el.shadowRoot) {
+                                const f = findBox(el.shadowRoot, text);
+                                if (f) return f;
+                            }
+                            if (el.children.length === 0 && el.textContent.includes(text)) {
+                                // Walk up to find the dialog container (bigger element)
+                                let p = el.parentElement;
+                                while (p) {
+                                    const r = p.getBoundingClientRect();
+                                    if (r.width > 200 && r.height > 100) return {x: r.x, y: r.y, w: r.width, h: r.height};
+                                    p = p.parentElement;
                                 }
                             }
                         }
+                        return null;
                     }
-                    scan(document);
-                    return results;
+                    return findBox(document, 'Are you sure you want to continue');
                 }""")
-                print(f"[trigger] Disconnect dialog — visible buttons (incl shadow DOM): {dom_info}", file=sys.stderr)
-
-                # Find the OK button specifically — text 'OK', rightmost among short-text buttons
-                short_btns = [b for b in dom_info if b['text'] in ('OK', 'Ok', 'ok')]
-                if not short_btns:
-                    # Fallback: rightmost button with text ≤ 4 chars that isn't blank
-                    short_btns = [b for b in dom_info if 1 <= len(b['text']) <= 4]
-                if short_btns:
-                    ok_btn = max(short_btns, key=lambda b: b['x'])
-                    print(f"[trigger] Clicking OK button: {ok_btn}", file=sys.stderr)
-                    await page.mouse.click(ok_btn['x'] + ok_btn['w'] // 2,
-                                           ok_btn['y'] + ok_btn['h'] // 2)
+                print(f"[trigger] Dialog bounding box: {dialog_box}", file=sys.stderr)
+                if dialog_box:
+                    # OK button is bottom-right of the dialog
+                    ok_x = dialog_box['x'] + dialog_box['w'] * 0.88
+                    ok_y = dialog_box['y'] + dialog_box['h'] * 0.88
+                    print(f"[trigger] Clicking OK at ({ok_x:.0f}, {ok_y:.0f})", file=sys.stderr)
+                    await page.mouse.click(ok_x, ok_y)
                 else:
-                    print("[trigger] OK button not found in shadow DOM scan — pressing Enter.", file=sys.stderr)
                     await page.keyboard.press("Enter")
-
                 await asyncio.sleep(1.5)
                 confirmed = True
                 break
