@@ -52,8 +52,24 @@ RUNTIME_CONNECT_TIMEOUT = 240
 HOSTNAME_WAIT_TIMEOUT = 300
 HOSTNAME_RE = re.compile(r'([\w-]+\.trycloudflare\.com)')
 
-NTFY_TOPIC = "colab-ssh-allyoushawn-e3b76118-69fd-4a29-89c1-c34e07b0977e"
 NTFY_POLL_INTERVAL = 10  # seconds between ntfy.sh polls
+
+# Load ntfy topic from local secrets file (never hardcode in public repo)
+_SECRETS_FILE = Path(__file__).parent.parent / ".colab_secrets"
+
+def _load_ntfy_topic() -> str:
+    if not _SECRETS_FILE.exists():
+        raise RuntimeError(
+            f"Secrets file not found: {_SECRETS_FILE}\n"
+            "Create it with: NTFY_TOPIC=colab-ssh-<your-uuid>"
+        )
+    for line in _SECRETS_FILE.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("NTFY_TOPIC="):
+            return line.split("=", 1)[1].strip()
+    raise RuntimeError(f"NTFY_TOPIC not found in {_SECRETS_FILE}")
+
+NTFY_TOPIC = _load_ntfy_topic()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

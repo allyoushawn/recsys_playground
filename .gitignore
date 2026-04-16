@@ -2,3 +2,4 @@
 venv/
 .claude/
 .DS_Store
+.colab_secrets
