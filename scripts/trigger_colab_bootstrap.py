@@ -488,6 +488,20 @@ async def trigger_bootstrap() -> str:
             page = await _wait_runtime_connected(ctx)
             page = await _handle_all_modals(ctx, page)
 
+            # Reload page to force Colab to fetch latest notebook content from GitHub.
+            # Without this, Colab may silently show a Drive-autosaved version (which
+            # can be stale if the notebook was edited locally and pushed to GitHub).
+            print("[trigger] Reloading page to fetch latest notebook content from GitHub...", file=sys.stderr)
+            await page.reload(wait_until="load")
+            await page.wait_for_selector(
+                "colab-connect-button, #connect, colab-toolbar-button",
+                timeout=60_000,
+            )
+            page = await _handle_all_modals(ctx, page)
+            # Runtime reconnects automatically after reload; wait for it to be live again.
+            page = await _wait_runtime_connected(ctx)
+            page = await _handle_all_modals(ctx, page)
+
             start_epoch = int(time.time())
             await page.keyboard.press("Control+F9")
             print("[trigger] Running all cells...", file=sys.stderr)
