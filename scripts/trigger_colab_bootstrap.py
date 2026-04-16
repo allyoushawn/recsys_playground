@@ -224,15 +224,119 @@ async def _click_connect(page):
         print("[trigger] Warning: Connect not clicked — may already be connected.", file=sys.stderr)
 
 
-async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
-    """Open the Connect-button dropdown → Change runtime type → select radio → Save.
+async def _open_connect_dropdown(page) -> bool:
+    """Open the Connect-button dropdown (the ▼ chevron). Returns True on success."""
+    opened = await page.evaluate("""() => {
+        const host = document.querySelector('colab-connect-button');
+        if (!host || !host.shadowRoot) return false;
+        const btns = Array.from(host.shadowRoot.querySelectorAll('button, [role="button"]'));
+        const trigger = btns.find(b => b.getAttribute('aria-haspopup')) || btns[btns.length - 1];
+        if (!trigger) return false;
+        trigger.click();
+        return true;
+    }""")
+    if not opened:
+        cb = page.locator("colab-connect-button").first
+        box = await cb.bounding_box()
+        if box:
+            await page.mouse.click(box["x"] + box["width"] - 8, box["y"] + box["height"] / 2)
+            return True
+        return False
+    return True
 
-    The hardware accelerator is a set of radio buttons (CPU, T4 GPU, L4 GPU, …).
-    Clicking the radio label selects it; then Save commits the choice.
+
+async def _click_ok_in_dialog(page) -> bool:
+    """Find and click the OK button across all shadow DOMs using coordinate-based click.
+
+    Traverses every shadow root to find a visible button with text 'OK', gets
+    its center coordinates from getBoundingClientRect, then issues a mouse click.
+    Returns True if an OK button was found and clicked.
+    """
+    result = await page.evaluate("""() => {
+        const found = [];
+        function collect(root) {
+            for (const el of root.querySelectorAll('*')) {
+                if (el.shadowRoot) collect(el.shadowRoot);
+                const tag = el.tagName ? el.tagName.toLowerCase() : '';
+                const role = el.getAttribute ? el.getAttribute('role') : '';
+                if (tag === 'button' || role === 'button') {
+                    const text = el.textContent.trim();
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        found.push({text, x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height});
+                    }
+                }
+            }
+        }
+        collect(document);
+        const ok = found.find(b => b.text === 'OK' || b.text === 'Ok');
+        return ok ? {found: true, ...ok} : {found: false, all: found.map(b => b.text)};
+    }""")
+    if result.get("found"):
+        print(f"[trigger] OK button found at ({result['x']:.0f}, {result['y']:.0f}) — clicking.", file=sys.stderr)
+        await page.mouse.click(result["x"], result["y"])
+        return True
+    print(f"[trigger] OK button not found. Visible buttons: {result.get('all', [])}", file=sys.stderr)
+    return False
+
+
+async def _disconnect_runtime(page) -> bool:
+    """Disconnect and delete the current runtime via the Connect dropdown.
+
+    Clicks the 'Disconnect and delete runtime' menu item, then handles the
+    resulting confirmation dialog by clicking OK.
+    Returns True if disconnect was triggered, False if no runtime was live.
+    """
+    if not await _runtime_is_live(page):
+        return False
+
+    opened = await _open_connect_dropdown(page)
+    if not opened:
+        return False
+    await asyncio.sleep(0.8)
+
+    disconnect = page.get_by_role("menuitem", name="Disconnect and delete runtime")
+    try:
+        if await disconnect.is_visible(timeout=3_000):
+            await disconnect.click()
+            print("[trigger] Clicked 'Disconnect and delete runtime' menu item.", file=sys.stderr)
+            # The menu item triggers a confirmation dialog — click OK to confirm.
+            await asyncio.sleep(1.5)
+            clicked_ok = await _click_ok_in_dialog(page)
+            if not clicked_ok:
+                # Fallback: try Enter key (dialog OK may have focus)
+                await page.keyboard.press("Enter")
+                print("[trigger] Pressed Enter as fallback for dialog OK.", file=sys.stderr)
+            await asyncio.sleep(2)
+            return True
+    except Exception as exc:
+        print(f"[trigger] _disconnect_runtime error: {exc}", file=sys.stderr)
+    await page.keyboard.press("Escape")
+    return False
+
+
+async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
+    """Disconnect any running runtime, then set the hardware accelerator type.
+
+    Strategy:
+    1. If a runtime is live, disconnect it first (avoids the confirmation overlay
+       that appears when changing type with an active session).
+    2. Open Connect dropdown → Change runtime type → select radio → Save.
 
     Returns True if the runtime type was set, False otherwise.
     """
     try:
+        # ── Step 0: disconnect existing runtime to avoid confirmation dialog ──
+        if await _runtime_is_live(page):
+            print("[trigger] Disconnecting existing runtime before type change...", file=sys.stderr)
+            await _disconnect_runtime(page)
+            # Wait for runtime to fully disconnect
+            for _ in range(10):
+                if not await _runtime_is_live(page):
+                    break
+                await asyncio.sleep(1)
+            print("[trigger] Runtime disconnected.", file=sys.stderr)
+
         # ── Step 1: open the Connect-button dropdown ──────────────────────────
         # The ▼ chevron is inside colab-connect-button's shadow DOM.
         # Strategy: inspect the shadow root, log what we find, then click the
@@ -342,14 +446,11 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
             return False
         await asyncio.sleep(0.5)
 
-        # ── Step 3b: handle "Disconnect and delete runtime" confirmation ───────
-        # When an existing runtime is active and the GPU type changes, Colab
-        # overlays a confirmation before showing Save. Detect it and click OK.
-        # IMPORTANT: detect by the unique body text "Are you sure you want to
-        # continue?" — NOT the title, which also appears as a menu item in the
-        # Connect dropdown and would always give a false positive.
+        # ── Step 3b: handle unexpected "Disconnect and delete runtime" confirmation ─
+        # With the disconnect-first strategy (Step 0), this dialog should not appear.
+        # Keep as a safety net for edge cases where disconnect didn't fully complete.
         confirmed = False
-        deadline = asyncio.get_event_loop().time() + 6
+        deadline = asyncio.get_event_loop().time() + 4
         while asyncio.get_event_loop().time() < deadline:
             dialog_visible = await page.evaluate("""() => {
                 function hasText(root, text) {
@@ -359,44 +460,12 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
                     }
                     return false;
                 }
-                // Use unique body text — the title "Disconnect and delete runtime"
-                // also appears as a menu item and gives false positives.
                 return hasText(document, 'Are you sure you want to continue');
             }""")
             if dialog_visible:
-                await page.screenshot(path="/tmp/colab_disconnect_dialog.png")
-                print("[trigger] Disconnect confirmation detected — clicking OK by dialog coordinates.", file=sys.stderr)
-                # Find the dialog container by its unique body text, then click the
-                # bottom-right area (where OK lives). This avoids shadow DOM button hunting.
-                dialog_box = await page.evaluate("""() => {
-                    function findBox(root, text) {
-                        for (const el of root.querySelectorAll('*')) {
-                            if (el.shadowRoot) {
-                                const f = findBox(el.shadowRoot, text);
-                                if (f) return f;
-                            }
-                            if (el.children.length === 0 && el.textContent.includes(text)) {
-                                // Walk up to find the dialog container (bigger element)
-                                let p = el.parentElement;
-                                while (p) {
-                                    const r = p.getBoundingClientRect();
-                                    if (r.width > 200 && r.height > 100) return {x: r.x, y: r.y, w: r.width, h: r.height};
-                                    p = p.parentElement;
-                                }
-                            }
-                        }
-                        return null;
-                    }
-                    return findBox(document, 'Are you sure you want to continue');
-                }""")
-                print(f"[trigger] Dialog bounding box: {dialog_box}", file=sys.stderr)
-                if dialog_box:
-                    # OK button is bottom-right of the dialog
-                    ok_x = dialog_box['x'] + dialog_box['w'] * 0.88
-                    ok_y = dialog_box['y'] + dialog_box['h'] * 0.88
-                    print(f"[trigger] Clicking OK at ({ok_x:.0f}, {ok_y:.0f})", file=sys.stderr)
-                    await page.mouse.click(ok_x, ok_y)
-                else:
+                print("[trigger] Unexpected disconnect confirmation — clicking OK.", file=sys.stderr)
+                clicked_ok = await _click_ok_in_dialog(page)
+                if not clicked_ok:
                     await page.keyboard.press("Enter")
                 await asyncio.sleep(1.5)
                 confirmed = True
