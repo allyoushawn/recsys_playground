@@ -597,14 +597,25 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
                 await asyncio.sleep(2)
 
                 await _click_connect(page)
-                await asyncio.sleep(2)
+                await asyncio.sleep(5)
 
                 # Handle modals that appear AFTER clicking Connect (sign-in, not-authored)
                 page = _colab_page(ctx) or page
                 page = await _handle_all_modals(ctx, page)
 
-                # Auth redirect may have abandoned the first Connect — retry
-                if not await _runtime_is_live(page):
+                # Retry connect ONLY if runtime shows no sign of activity at all
+                # (e.g. auth redirect). Premium GPUs (L4, A100) take 30-60s to
+                # provision — do NOT retry during provisioning or it cancels the request.
+                btn_state = await page.evaluate("""() => {
+                    const host = document.querySelector('colab-connect-button');
+                    if (!host || !host.shadowRoot) return 'unknown';
+                    const btn = host.shadowRoot.querySelector('button');
+                    return btn ? btn.textContent.trim().toLowerCase() : 'unknown';
+                }""")
+                print(f"[trigger] Connect button state after click: '{btn_state}'", file=sys.stderr)
+                if btn_state == "connect":
+                    # Button reverted to idle — auth redirect likely ate the click
+                    print("[trigger] Connect reverted to idle — retrying once.", file=sys.stderr)
                     await _click_connect(page)
                     await asyncio.sleep(2)
 
