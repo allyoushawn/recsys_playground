@@ -307,15 +307,25 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
 
         # ── Step 3b: handle "Disconnect and delete runtime" confirmation ───────
         # When an existing runtime is active and the GPU type changes, Colab
-        # overlays a confirmation dialog before showing Save. Click OK to proceed.
-        try:
-            ok_btn = page.get_by_role("button", name="OK")
-            if await ok_btn.is_visible(timeout=3_000):
-                await ok_btn.click()
-                print("[trigger] Confirmed 'Disconnect and delete runtime' → OK.", file=sys.stderr)
-                await asyncio.sleep(1)
-        except Exception:
-            pass  # No confirmation dialog — runtime was already idle
+        # overlays a confirmation before showing Save. Click OK to proceed.
+        # The dialog appears asynchronously — wait up to 8s for it.
+        confirmed = False
+        for ok_locator in [
+            page.locator("text=OK").last,
+            page.get_by_text("OK", exact=True).last,
+            page.get_by_role("button", name="OK"),
+        ]:
+            try:
+                if await ok_locator.is_visible(timeout=8_000):
+                    await ok_locator.click()
+                    print("[trigger] Confirmed 'Disconnect and delete runtime' → OK.", file=sys.stderr)
+                    await asyncio.sleep(1.5)
+                    confirmed = True
+                    break
+            except Exception:
+                pass
+        if not confirmed:
+            print("[trigger] No disconnect confirmation dialog — continuing.", file=sys.stderr)
 
         # ── Step 4: click Save ────────────────────────────────────────────────
         save_btn = page.get_by_role("button", name="Save")
