@@ -29,7 +29,8 @@ Preflight should catch destructive git-on-repo-root patterns; see [compatibility
 
 ## Prerequisites
 
-- `cloudflared` and `sshpass` installed locally (`brew install cloudflared sshpass`)
+- `cloudflared` installed locally (`brew install cloudflared`)
+- SSH key at `~/.ssh/colab_key` (private key matching the public key installed by the bootstrap notebook)
 - `notebooks/ad_hoc/colab_ssh_bootstrap.ipynb` exists in the repo
 - `scripts/connect_colab.sh` exists in the repo
 
@@ -78,7 +79,7 @@ The script: launches Chrome with the saved session → opens the bootstrap noteb
 Once `<HOSTNAME>` is obtained (automated or manual), verify connectivity:
 
 ```bash
-sshpass -p "cursorssh" ssh <SSH_OPTS> root@<HOSTNAME> \
+ssh <SSH_OPTS> root@<HOSTNAME> \
   "echo OK && nvidia-smi --query-gpu=name --format=csv,noheader"
 ```
 
@@ -88,14 +89,14 @@ If it fails, tell the user (runtime not started, hostname expired, etc.).
 
 1. **Copy notebook to Colab via scp:**
    ```bash
-   sshpass -p "cursorssh" scp <SSH_OPTS> \
+   scp <SSH_OPTS> \
      <LOCAL_NOTEBOOK_PATH> \
      root@<HOSTNAME>:<REMOTE_REPO_ROOT>/<NOTEBOOK_PATH>
    ```
 
 2. **Run notebook via papermill:**
    ```bash
-   sshpass -p "cursorssh" ssh <SSH_OPTS> root@<HOSTNAME> \
+   ssh <SSH_OPTS> root@<HOSTNAME> \
      "cd <REMOTE_REPO_ROOT> && papermill <NOTEBOOK_PATH> <OUTPUT_PATH> --log-output 2>&1"
    ```
    Where `<OUTPUT_PATH>` replaces the filename suffix with `_output.ipynb`
@@ -120,6 +121,7 @@ Use this everywhere as `<SSH_OPTS>`:
 
 ```
 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+-o IdentityFile=~/.ssh/colab_key \
 -o ProxyCommand="cloudflared access ssh --hostname <HOSTNAME>"
 ```
 
@@ -129,4 +131,4 @@ Use this everywhere as `<SSH_OPTS>`:
 |----------|-------|
 | `<REMOTE_REPO_ROOT>` | `/content/drive/MyDrive/colab/recsys_playground/recsys_playground` |
 | Dataset cache | `/content/drive/MyDrive/colab/data/` |
-| SSH password | `cursorssh` |
+| SSH key | `~/.ssh/colab_key` (key auth only; password auth disabled) |

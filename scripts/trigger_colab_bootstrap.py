@@ -61,7 +61,8 @@ def _load_ntfy_topic() -> str:
     if not _SECRETS_FILE.exists():
         raise RuntimeError(
             f"Secrets file not found: {_SECRETS_FILE}\n"
-            "Create it with: NTFY_TOPIC=colab-ssh-<your-uuid>"
+            "Create it with: NTFY_TOPIC=colab-ssh-<your-uuid>\n"
+            "Also add NTFY_TOPIC as a Colab Secret (left panel → key icon) so the notebook can read it."
         )
     for line in _SECRETS_FILE.read_text().splitlines():
         line = line.strip()
@@ -70,6 +71,7 @@ def _load_ntfy_topic() -> str:
     raise RuntimeError(f"NTFY_TOPIC not found in {_SECRETS_FILE}")
 
 NTFY_TOPIC = _load_ntfy_topic()
+SSH_KEY = Path.home() / ".ssh" / "colab_key"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -280,6 +282,22 @@ async def _handle_drive_auth_background(ctx) -> None:
                         await btn.click()
                         await asyncio.sleep(2)
                         break
+                except Exception:
+                    pass
+
+        # ── 3. Colab Secrets access dialog ────────────────────────────────────
+        if colab_page:
+            for label in ["Grant access", "Allow", "OK"]:
+                try:
+                    btn = colab_page.get_by_role("button", name=re.compile(label, re.I)).first
+                    if await btn.is_visible(timeout=500):
+                        # Only click if a secrets-related prompt is visible
+                        secrets_hint = colab_page.locator("text=secret").first
+                        if await secrets_hint.is_visible(timeout=500):
+                            print(f"[trigger] Colab secrets dialog: clicking '{label}'.", file=sys.stderr)
+                            await btn.click()
+                            await asyncio.sleep(1)
+                            break
                 except Exception:
                     pass
 
