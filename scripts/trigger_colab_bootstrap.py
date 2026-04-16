@@ -279,12 +279,40 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
         await asyncio.sleep(0.8)
 
         # ── Step 2: click "Change runtime type" in the dropdown ───────────────
-        change_rt = page.locator("text=Change runtime type").first
-        if not await change_rt.is_visible(timeout=5_000):
+        # Menu items may live inside shadow DOM — use recursive JS traversal.
+        async def _click_menu_item(label: str) -> bool:
+            return await page.evaluate(f"""() => {{
+                function clickByText(root, text) {{
+                    for (const el of root.querySelectorAll('*')) {{
+                        if (el.shadowRoot) {{
+                            if (clickByText(el.shadowRoot, text)) return true;
+                        }}
+                        if (el.children.length === 0 && el.textContent.trim() === text) {{
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {{
+                                el.click();
+                                return true;
+                            }}
+                        }}
+                    }}
+                    return false;
+                }}
+                return clickByText(document, {repr(label)});
+            }}""")
+
+        clicked = await _click_menu_item("Change runtime type")
+        if not clicked:
+            # Fallback: try regular Playwright locator
+            change_rt = page.locator("text=Change runtime type").first
+            if await change_rt.is_visible(timeout=3_000):
+                await change_rt.click()
+                clicked = True
+
+        if not clicked:
             await page.keyboard.press("Escape")
             print("[trigger] 'Change runtime type' not found in dropdown.", file=sys.stderr)
             return False
-        await change_rt.click()
+        print("[trigger] Clicked 'Change runtime type'.", file=sys.stderr)
         await asyncio.sleep(1.5)
 
         # ── Step 3: click the radio button for the requested GPU type ─────────
