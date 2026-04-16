@@ -613,15 +613,17 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
 
             page = await _handle_all_modals(ctx, page)
 
-            # Set GPU runtime type BEFORE connecting (only when no runtime is active).
-            # If a runtime is already live, changing type would restart it — skip.
-            if await _runtime_is_live(page):
-                print("[trigger] Runtime already active or resuming — skipping Connect click.", file=sys.stderr)
-            else:
-                await _set_runtime_type_gpu(page, gpu_type=gpu_type)
-                # Give Colab a moment to settle after the runtime type dialog closes
-                await asyncio.sleep(2)
+            # Always set the GPU type first — even if a runtime is live.
+            # If a different type is already running, _set_runtime_type_gpu handles
+            # the "Disconnect and delete runtime" confirmation, which disconnects
+            # the old session so we can connect with the correct type.
+            await _set_runtime_type_gpu(page, gpu_type=gpu_type)
+            await asyncio.sleep(2)
 
+            # After potential disconnect from type change, check if still live.
+            if await _runtime_is_live(page):
+                print("[trigger] Runtime already active with correct type — skipping Connect.", file=sys.stderr)
+            else:
                 await _click_connect(page)
                 await asyncio.sleep(5)
 
@@ -629,9 +631,8 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
                 page = _colab_page(ctx) or page
                 page = await _handle_all_modals(ctx, page)
 
-                # Retry connect ONLY if runtime shows no sign of activity at all
-                # (e.g. auth redirect). Premium GPUs (L4, A100) take 30-60s to
-                # provision — do NOT retry during provisioning or it cancels the request.
+                # Retry connect ONLY if button shows fully idle (auth redirect case).
+                # Premium GPUs take 30-60s to provision — don't interrupt provisioning.
                 btn_state = await page.evaluate("""() => {
                     const host = document.querySelector('colab-connect-button');
                     if (!host || !host.shadowRoot) return 'unknown';
@@ -640,7 +641,6 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
                 }""")
                 print(f"[trigger] Connect button state after click: '{btn_state}'", file=sys.stderr)
                 if btn_state == "connect":
-                    # Button reverted to idle — auth redirect likely ate the click
                     print("[trigger] Connect reverted to idle — retrying once.", file=sys.stderr)
                     await _click_connect(page)
                     await asyncio.sleep(2)
