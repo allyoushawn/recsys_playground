@@ -221,6 +221,73 @@ async def _click_connect(page):
         print("[trigger] Warning: Connect not clicked — may already be connected.", file=sys.stderr)
 
 
+async def _set_runtime_type_gpu(page) -> bool:
+    """Navigate Runtime → Change runtime type → select T4 GPU → Save.
+
+    Returns True if the runtime type was changed, False if it was already set
+    or if the dialog could not be navigated.
+    """
+    try:
+        # Open the Runtime menu in the top menubar
+        runtime_menu = page.locator("text=Runtime").first
+        if not await runtime_menu.is_visible(timeout=5_000):
+            print("[trigger] Runtime menu not visible — skipping GPU type set.", file=sys.stderr)
+            return False
+        await runtime_menu.click()
+        await asyncio.sleep(0.5)
+
+        # Click "Change runtime type"
+        change_rt = page.locator("text=Change runtime type").first
+        if not await change_rt.is_visible(timeout=5_000):
+            # Dismiss menu and bail
+            await page.keyboard.press("Escape")
+            print("[trigger] 'Change runtime type' not found — skipping.", file=sys.stderr)
+            return False
+        await change_rt.click()
+        await asyncio.sleep(1)
+
+        # The dialog has a hardware accelerator selector. Try to find and click T4 GPU.
+        # Colab renders this as a <select> or a list of options.
+        try:
+            # Try <select> approach first
+            select_el = page.locator("select").first
+            if await select_el.is_visible(timeout=3_000):
+                await select_el.select_option(label="T4 GPU")
+                print("[trigger] Selected T4 GPU via <select>.", file=sys.stderr)
+        except Exception:
+            pass
+
+        # Also try clicking a visible "T4 GPU" label/option in case it's a custom widget
+        try:
+            t4_opt = page.locator("text=T4 GPU").first
+            if await t4_opt.is_visible(timeout=3_000):
+                await t4_opt.click()
+                print("[trigger] Selected T4 GPU via label click.", file=sys.stderr)
+        except Exception:
+            pass
+
+        # Click Save
+        save_btn = page.locator("text=Save").first
+        if await save_btn.is_visible(timeout=5_000):
+            await save_btn.click()
+            print("[trigger] Runtime type saved (T4 GPU).", file=sys.stderr)
+            await asyncio.sleep(2)
+            return True
+
+        # Couldn't find Save — dismiss
+        await page.keyboard.press("Escape")
+        print("[trigger] Save button not found in runtime type dialog.", file=sys.stderr)
+        return False
+
+    except Exception as exc:
+        print(f"[trigger] _set_runtime_type_gpu error: {exc}", file=sys.stderr)
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
+
 async def _runtime_is_live(page) -> bool:
     """Return True if the page already shows an active or resuming runtime."""
     live_selectors = [
@@ -459,11 +526,13 @@ async def trigger_bootstrap() -> str:
 
             page = await _handle_all_modals(ctx, page)
 
-            # Only click Connect if no runtime is already active/resuming.
-            # Clicking Connect on a resuming session interrupts it and causes delays.
+            # Set GPU runtime type BEFORE connecting (only when no runtime is active).
+            # If a runtime is already live, changing type would restart it — skip.
             if await _runtime_is_live(page):
                 print("[trigger] Runtime already active or resuming — skipping Connect click.", file=sys.stderr)
             else:
+                await _set_runtime_type_gpu(page)
+
                 await _click_connect(page)
                 await asyncio.sleep(2)
 
@@ -475,15 +544,6 @@ async def trigger_bootstrap() -> str:
                 if not await _runtime_is_live(page):
                     await _click_connect(page)
                     await asyncio.sleep(2)
-
-            # T4 GPU picker
-            try:
-                gpu = page.locator("text=T4 GPU").first
-                if await gpu.is_visible(timeout=3_000):
-                    await gpu.click()
-                    print("[trigger] Selected T4 GPU.", file=sys.stderr)
-            except Exception:
-                pass
 
             page = await _wait_runtime_connected(ctx)
             page = await _handle_all_modals(ctx, page)
