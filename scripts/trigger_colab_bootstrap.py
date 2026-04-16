@@ -231,22 +231,52 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
     """
     try:
         # ── Step 1: open the Connect-button dropdown ──────────────────────────
-        # The dropdown arrow (▼) is a separate button inside colab-connect-button's
-        # shadow DOM. Click it via JS to avoid shadow-DOM selector fragility.
+        # The ▼ chevron is inside colab-connect-button's shadow DOM.
+        # Strategy: inspect the shadow root, log what we find, then click the
+        # rightmost button (the dropdown trigger).
+        debug_info = await page.evaluate("""() => {
+            const host = document.querySelector('colab-connect-button');
+            if (!host) return {found: false, reason: 'no colab-connect-button'};
+            const root = host.shadowRoot;
+            if (!root) return {found: false, reason: 'no shadowRoot (closed mode?)'};
+            const btns = Array.from(root.querySelectorAll('button, [role="button"]'));
+            return {
+                found: true,
+                count: btns.length,
+                labels: btns.map(b => b.getAttribute('aria-label') || b.textContent.trim().slice(0,30)),
+                ariaHaspopup: btns.map(b => b.getAttribute('aria-haspopup')),
+            };
+        }""")
+        print(f"[trigger] Connect button shadow DOM: {debug_info}", file=sys.stderr)
+
+        opened = False
+
+        # Try clicking the button with aria-haspopup (the dropdown trigger)
         opened = await page.evaluate("""() => {
             const host = document.querySelector('colab-connect-button');
             if (!host || !host.shadowRoot) return false;
-            // The last button in the shadow root is the dropdown chevron
-            const btns = host.shadowRoot.querySelectorAll('button, [role="button"]');
-            if (btns.length === 0) return false;
-            btns[btns.length - 1].click();
+            const btns = Array.from(host.shadowRoot.querySelectorAll('button, [role="button"]'));
+            // Prefer aria-haspopup button; fall back to last button
+            const trigger = btns.find(b => b.getAttribute('aria-haspopup')) || btns[btns.length - 1];
+            if (!trigger) return false;
+            trigger.click();
             return true;
         }""")
+
+        if not opened:
+            # Fallback: click the right edge of colab-connect-button (where ▼ lives)
+            print("[trigger] JS open failed; clicking right edge of connect button.", file=sys.stderr)
+            cb = page.locator("colab-connect-button").first
+            box = await cb.bounding_box()
+            if box:
+                await page.mouse.click(box["x"] + box["width"] - 8, box["y"] + box["height"] / 2)
+                opened = True
+
         if not opened:
             print("[trigger] Could not open Connect dropdown — skipping GPU type set.", file=sys.stderr)
             return False
         print("[trigger] Opened Connect dropdown.", file=sys.stderr)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.8)
 
         # ── Step 2: click "Change runtime type" in the dropdown ───────────────
         change_rt = page.locator("text=Change runtime type").first
