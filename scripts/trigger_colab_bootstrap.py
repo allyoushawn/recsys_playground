@@ -20,10 +20,14 @@ Normal usage:
     python3 scripts/trigger_colab_bootstrap.py
     → Prints hostname to stdout on success.
     → Exits with code 1 on failure.
+    → Writes viewport PNGs to /tmp/colab_trigger_<timestamp>_NN_<step>.png for review (disable: --no-screenshots).
+    → After runtime connects, checks the Colab UI for the requested accelerator token (e.g. T4) and fails fast if missing.
 
 Requirements:
     pip3 install playwright
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
@@ -35,6 +39,19 @@ import urllib.request
 from pathlib import Path
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+# Set True via --debug-dialog (logs md-text-button snapshots when clicking OK in modals).
+_DEBUG_DIALOG = True
+
+# Progress screenshots for humans/agents (viewport PNGs). Disable with --no-screenshots.
+_PROCESS_SCREENSHOTS = True
+_SCREENSHOT_DIR = Path("/tmp")
+_RUN_SCREENSHOT_STAMP = ""
+_SCREENSHOT_SEQ = 0
+# Minimum seconds between runtime-wait / ntfy-wait viewport screenshots (CLI: --screenshot-interval).
+_SCREENSHOT_INTERVAL_SEC = 1.0
+# Set when Change-runtime-type → Save succeeds (used if DOM never exposes GPU label text).
+_RUNTIME_TYPE_SAVE_GPU: str | None = None
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -48,7 +65,7 @@ COLAB_PROFILE = Path.home() / ".colab_chrome_profile"
 CDP_PORT = 9222
 CDP_URL = f"http://localhost:{CDP_PORT}"
 
-RUNTIME_CONNECT_TIMEOUT = 240
+RUNTIME_CONNECT_TIMEOUT = 180
 HOSTNAME_WAIT_TIMEOUT = 300
 HOSTNAME_RE = re.compile(r'([\w-]+\.trycloudflare\.com)')
 
@@ -72,6 +89,138 @@ def _load_ntfy_topic() -> str:
 
 NTFY_TOPIC = _load_ntfy_topic()
 SSH_KEY = Path.home() / ".ssh" / "colab_key"
+
+
+def _screenshot_run_init() -> None:
+    global _RUN_SCREENSHOT_STAMP, _SCREENSHOT_SEQ
+    _RUN_SCREENSHOT_STAMP = time.strftime("%Y%m%d_%H%M%S")
+    _SCREENSHOT_SEQ = 0
+
+
+async def _screenshot_process(page, step: str) -> None:
+    """Save a viewport PNG under _SCREENSHOT_DIR for post-run review (e.g. read_image on /tmp)."""
+    if not _PROCESS_SCREENSHOTS:
+        return
+    if page is None:
+        return
+    global _SCREENSHOT_SEQ
+    _SCREENSHOT_SEQ += 1
+    safe = re.sub(r"[^\w\-.]+", "_", (step or "step").strip())[:55].strip("_") or "step"
+    fname = f"colab_trigger_{_RUN_SCREENSHOT_STAMP}_{_SCREENSHOT_SEQ:03d}_{safe}.png"
+    out = _SCREENSHOT_DIR / fname
+    try:
+        _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(out), full_page=False)
+        print(f"[trigger] Screenshot ({step}) → {out}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[trigger] Screenshot failed ({step}): {exc}", file=sys.stderr)
+
+
+def _gpu_match_keyword(gpu_type: str) -> str | None:
+    """Return a short token to match in Colab UI (e.g. 'T4 GPU' -> 'T4'). None = skip check."""
+    s = (gpu_type or "").strip()
+    if not s or re.match(r"(?i)^none$", s):
+        return None
+    # Strip trailing " GPU" / "gpu"
+    s = re.sub(r"(?i)\s*gpu\s*$", "", s).strip()
+    return s or None
+
+
+async def _runtime_gpu_probe_text(page) -> str:
+    """Collect visible strings Colab uses for accelerator / RAM (best-effort)."""
+    try:
+        return await page.evaluate(
+            """() => {
+              function textDeep(root, maxLen) {
+                let out = '';
+                function walk(n) {
+                  if (!n || out.length >= maxLen) return;
+                  if (n.nodeType === 3) out += n.textContent || '';
+                  if (n.shadowRoot) walk(n.shadowRoot);
+                  const kids = n.children || [];
+                  for (let i = 0; i < kids.length && out.length < maxLen; i++) walk(kids[i]);
+                }
+                walk(root);
+                return out.slice(0, maxLen);
+              }
+              const chunks = [];
+              const u = document.querySelector('colab-usage-display');
+              if (u) {
+                chunks.push(u.textContent || '');
+                chunks.push(textDeep(u, 6000));
+              }
+              const host = document.querySelector('colab-connect-button');
+              if (host && host.shadowRoot) {
+                const b = host.shadowRoot.querySelector('button');
+                if (b) chunks.push(b.textContent || '');
+                chunks.push(textDeep(host, 8000));
+              }
+              const rts = document.querySelectorAll('colab-runtime-status, colab-env-details, colab-footer, colab-toolbar, #top-toolbar, #toolbar-area');
+              rts.forEach(el => chunks.push(textDeep(el, 8000)));
+              document.querySelectorAll('[aria-label]').forEach(el => {
+                const a = el.getAttribute('aria-label') || '';
+                if (/(T4|L4|A100|H100|V100|TPU|GPU|Python)/i.test(a)) chunks.push(a);
+              });
+              const bar = document.querySelector('colab-header, colab-title-bar, [class*=\"colab\"]');
+              if (bar) chunks.push((bar.textContent || '').slice(0, 400));
+              const body = (document.body && document.body.innerText) ? document.body.innerText : '';
+              chunks.push(body.slice(0, 50000));
+              return chunks.join(' | ').slice(0, 62000);
+            }"""
+        )
+    except Exception:
+        return ""
+
+
+async def _assert_runtime_matches_gpu(page, gpu_type: str) -> None:
+    """Raise if the visible UI does not appear to show the requested accelerator.
+
+    Colab often shows RAM / runtime chips before the accelerator label (e.g. T4)
+    finishes painting — poll for up to 75s before failing.
+    """
+    key = _gpu_match_keyword(gpu_type)
+    if not key:
+        print("[trigger] GPU verify skipped (--gpu None or empty).", file=sys.stderr)
+        return
+    pat = re.compile(r"\b" + re.escape(key) + r"\b", re.I)
+    deadline = asyncio.get_event_loop().time() + 75
+    attempt = 0
+    while asyncio.get_event_loop().time() < deadline:
+        attempt += 1
+        blob = await _runtime_gpu_probe_text(page)
+        if blob.strip() and pat.search(blob):
+            print(f"[trigger] GPU verify OK: found {key!r} in UI probe (attempt {attempt}).", file=sys.stderr)
+            return
+        # Accessibility / pierced tree (sometimes innerText lags behind shadow labels).
+        try:
+            loc = page.get_by_text(re.compile(rf"\b{re.escape(key)}\b", re.I)).first
+            if await loc.is_visible(timeout=800):
+                print(f"[trigger] GPU verify OK: visible text match for {key!r} (attempt {attempt}).", file=sys.stderr)
+                return
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+    blob = await _runtime_gpu_probe_text(page)
+    global _RUNTIME_TYPE_SAVE_GPU
+    if _RUNTIME_TYPE_SAVE_GPU:
+        saved_key = _gpu_match_keyword(_RUNTIME_TYPE_SAVE_GPU)
+        if saved_key and saved_key.lower() == key.lower():
+            print(
+                f"[trigger] GPU verify SOFT OK: DOM never showed {key!r}, but runtime-type dialog Save "
+                f"succeeded for {_RUNTIME_TYPE_SAVE_GPU!r}.",
+                file=sys.stderr,
+            )
+            return
+    if not blob.strip():
+        raise RuntimeError(
+            "Runtime GPU verify failed: no readable UI text after 75s (probe still empty)."
+        )
+    await _screenshot_process(page, f"gpu_verify_FAIL_expected_{key}")
+    raise RuntimeError(
+        f"Runtime GPU verify failed: never saw accelerator {key!r} within 75s. Last probe excerpt: {blob[:500]!r}..."
+    )
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -245,13 +394,177 @@ async def _open_connect_dropdown(page) -> bool:
     return True
 
 
-async def _click_ok_in_dialog(page) -> bool:
-    """Find and click the OK button across all shadow DOMs using coordinate-based click.
+def _disconnect_runtime_dialog_locators(page):
+    """Locators for session-termination / runtime-change confirmation surfaces.
 
-    Traverses every shadow root to find a visible button with text 'OK', gets
-    its center coordinates from getBoundingClientRect, then issues a mouse click.
-    Returns True if an OK button was found and clicked.
+    Colab uses <md-dialog> whose content is in shadow DOM — role-based locators
+    with has_text filter can't pierce the shadow, so we include md-dialog directly.
     """
+    hint = re.compile(
+        r"Are you sure you want to continue|"
+        r"terminate your current session|"
+        r"Changing runtime attributes may terminate",
+        re.I,
+    )
+    return (
+        page.locator("md-dialog").last,           # topmost md-dialog (most specific)
+        page.locator("md-dialog"),                 # any md-dialog
+        page.get_by_role("alertdialog").filter(has_text=hint),
+        page.get_by_role("dialog").filter(has_text=hint),
+    )
+
+
+async def _runtime_disconnect_dialog_visible(page) -> bool:
+    """True when the disconnect / dangerous-action confirmation is still on screen."""
+    for loc in _disconnect_runtime_dialog_locators(page):
+        try:
+            if await loc.count() == 0:
+                continue
+            if await loc.first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _dialog_roots_for_disconnect(page):
+    """Playwright locators for each visible confirmation dialog root (nth)."""
+    roots = []
+    for loc in _disconnect_runtime_dialog_locators(page):
+        try:
+            n = await loc.count()
+            for i in range(n):
+                el = loc.nth(i)
+                if await el.is_visible(timeout=400):
+                    roots.append(el)
+        except Exception:
+            continue
+    return roots
+
+
+async def _debug_dump_runtime_dialog(page) -> None:
+    """Log visible md-* button labels (innerText) for UI-automation debugging."""
+    try:
+        data = await page.evaluate("""() => {
+          const out = [];
+          function walk(root) {
+            for (const el of root.querySelectorAll('*')) {
+              if (el.shadowRoot) walk(el.shadowRoot);
+              const tag = el.tagName ? el.tagName.toLowerCase() : '';
+              if (tag === 'md-text-button' || tag === 'md-filled-button' || tag === 'md-outlined-button') {
+                const r = el.getBoundingClientRect();
+                const t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
+                if (r.width > 0 && r.height > 0) {
+                  out.push({tag, t, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)});
+                }
+              }
+            }
+          }
+          walk(document);
+          return out;
+        }""")
+        blob = json.dumps(data, ensure_ascii=False)
+        print(f"[trigger] DEBUG md-buttons: {blob[:12000]}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[trigger] DEBUG dump failed: {exc}", file=sys.stderr)
+
+
+async def _click_ok_in_dialog(page) -> bool:
+    """Click OK on Colab disconnect / dangerous-action confirmation.
+
+    Scopes Playwright clicks to dialog|alertdialog that contain session-termination
+    copy — avoids clicking unrelated OK buttons (e.g. secrets / share prompts).
+    Verifies the confirmation surface closed when possible.
+    """
+    if _DEBUG_DIALOG:
+        await _debug_dump_runtime_dialog(page)
+
+    roots = await _dialog_roots_for_disconnect(page)
+
+    async def _try_click(locator, note: str) -> bool:
+        try:
+            if await locator.count() == 0:
+                return False
+            btn = locator.first
+            if not await btn.is_visible(timeout=2500):
+                return False
+            await btn.click(timeout=8000)
+            print(f"[trigger] OK clicked ({note}).", file=sys.stderr)
+            await asyncio.sleep(0.45)
+            return not await _runtime_disconnect_dialog_visible(page)
+        except Exception:
+            return False
+
+    # 1) Scoped Playwright: md-text-button / md-filled-button / ARIA role
+    for root in roots:
+        chain = [
+            (root.locator("md-text-button").filter(has_text=re.compile(r"^\s*OK\s*$", re.I)), "scoped md-text-button ^OK$"),
+            (root.locator("md-filled-button").filter(has_text=re.compile(r"^\s*OK\s*$", re.I)), "scoped md-filled-button ^OK$"),
+            (root.get_by_role("button", name=re.compile(r"^\s*ok\s*$", re.I)), "scoped ARIA button OK"),
+            (root.locator("md-text-button").filter(has_text="OK"), "scoped md-text-button substring OK"),
+        ]
+        for loc, note in chain:
+            if await _try_click(loc, note):
+                return True
+
+        # 2) Right-to-left scan: OK is usually the rightmost affirmative control
+        try:
+            mds = root.locator("md-text-button")
+            n = await mds.count()
+            for idx in range(n - 1, -1, -1):
+                btn = mds.nth(idx)
+                if not await btn.is_visible(timeout=600):
+                    continue
+                txt = (await btn.inner_text()).strip()
+                if re.match(r"(?i)^ok\s*$", txt):
+                    await btn.click(timeout=8000)
+                    print("[trigger] OK clicked (scoped md-text-button by inner_text).", file=sys.stderr)
+                    await asyncio.sleep(0.45)
+                    if not await _runtime_disconnect_dialog_visible(page):
+                        return True
+        except Exception:
+            pass
+
+    # 3) JS: collect md-text-button / md-filled-button centers; prefer /^ok$/i, else rightmost \bok\b
+    js_result = await page.evaluate("""() => {
+      const cands = [];
+      function walk(root) {
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) walk(el.shadowRoot);
+          const tag = el.tagName ? el.tagName.toLowerCase() : '';
+          if (tag === 'md-text-button' || tag === 'md-filled-button' || tag === 'md-outlined-button') {
+            const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+              cands.push({t, x: r.x + r.width / 2, y: r.y + r.height / 2, left: r.x});
+            }
+          }
+        }
+      }
+      walk(document);
+      const exact = cands.filter(c => /^ok$/i.test(c.t));
+      const pool = exact.length ? exact : cands.filter(c => /\\bok\\b/i.test(c.t));
+      pool.sort((a, b) => b.left - a.left);
+      const pick = pool[0];
+      return pick
+        ? {found: true, x: pick.x, y: pick.y, labels: cands.map(c => c.t).slice(0, 16)}
+        : {found: false, labels: cands.map(c => c.t).slice(0, 16)};
+    }""")
+    if js_result.get("found"):
+        print(
+            f"[trigger] OK via JS material scan → ({js_result['x']:.0f}, {js_result['y']:.0f}); labels={js_result.get('labels')}",
+            file=sys.stderr,
+        )
+        await page.mouse.click(js_result["x"], js_result["y"])
+        await asyncio.sleep(0.45)
+        if not await _runtime_disconnect_dialog_visible(page):
+            return True
+        print("[trigger] JS OK click did not dismiss disconnect dialog — fallbacks.", file=sys.stderr)
+
+    if _DEBUG_DIALOG:
+        print(f"[trigger] DEBUG: after JS, dialog_visible={await _runtime_disconnect_dialog_visible(page)}", file=sys.stderr)
+
+    # 4) Legacy: plain <button role=button> scan (textContent)
     result = await page.evaluate("""() => {
         const found = [];
         function collect(root) {
@@ -263,21 +576,29 @@ async def _click_ok_in_dialog(page) -> bool:
                     const text = el.textContent.trim();
                     const r = el.getBoundingClientRect();
                     if (r.width > 0 && r.height > 0) {
-                        found.push({text, x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height});
+                        found.push({text, x: r.x + r.width / 2, y: r.y + r.height / 2});
                     }
                 }
             }
         }
         collect(document);
-        const ok = found.find(b => b.text === 'OK' || b.text === 'Ok');
+        const ok = found.find(b => /^ok$/i.test(b.text));
         return ok ? {found: true, ...ok} : {found: false, all: found.map(b => b.text)};
     }""")
     if result.get("found"):
-        print(f"[trigger] OK button found at ({result['x']:.0f}, {result['y']:.0f}) — clicking.", file=sys.stderr)
+        print(f"[trigger] OK via legacy <button> scan at ({result['x']:.0f}, {result['y']:.0f}).", file=sys.stderr)
         await page.mouse.click(result["x"], result["y"])
-        return True
-    print(f"[trigger] OK button not found. Visible buttons: {result.get('all', [])}", file=sys.stderr)
-    return False
+        await asyncio.sleep(0.45)
+        if not await _runtime_disconnect_dialog_visible(page):
+            return True
+
+    await page.keyboard.press("Enter")
+    print("[trigger] Pressed Enter as last-resort OK.", file=sys.stderr)
+    await asyncio.sleep(0.45)
+    dismissed = not await _runtime_disconnect_dialog_visible(page)
+    if not dismissed and _DEBUG_DIALOG:
+        await _debug_dump_runtime_dialog(page)
+    return dismissed
 
 
 async def _disconnect_runtime(page) -> bool:
@@ -298,15 +619,29 @@ async def _disconnect_runtime(page) -> bool:
     disconnect = page.get_by_role("menuitem", name="Disconnect and delete runtime")
     try:
         if await disconnect.is_visible(timeout=3_000):
+            # Skip if disabled (e.g. runtime still connecting — option not available yet)
+            disabled = await disconnect.get_attribute("aria-disabled")
+            if disabled == "true":
+                print("[trigger] 'Disconnect and delete runtime' is disabled — skipping.", file=sys.stderr)
+                await page.keyboard.press("Escape")
+                return False
             await disconnect.click()
             print("[trigger] Clicked 'Disconnect and delete runtime' menu item.", file=sys.stderr)
             # The menu item triggers a confirmation dialog — click OK to confirm.
             await asyncio.sleep(1.5)
-            clicked_ok = await _click_ok_in_dialog(page)
-            if not clicked_ok:
-                # Fallback: try Enter key (dialog OK may have focus)
+            for attempt in range(1, 4):
+                clicked_ok = await _click_ok_in_dialog(page)
+                if clicked_ok or not await _runtime_disconnect_dialog_visible(page):
+                    break
+                print(
+                    f"[trigger] Disconnect dialog still visible after OK attempt {attempt} — retrying.",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(0.7)
+            if await _runtime_disconnect_dialog_visible(page):
                 await page.keyboard.press("Enter")
                 print("[trigger] Pressed Enter as fallback for dialog OK.", file=sys.stderr)
+                await asyncio.sleep(0.4)
             await asyncio.sleep(2)
             return True
     except Exception as exc:
@@ -396,55 +731,62 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
             print("[trigger] 'Change runtime type' menuitem not found.", file=sys.stderr)
             return False
         await asyncio.sleep(1.5)
+        await _screenshot_process(page, "gpu_dialog_opened")
 
         # ── Step 3: select the GPU radio button ───────────────────────────────
-        # Try multiple locator strategies since the label text may include extra
-        # content (compute unit badges, Pro+ markers) that breaks exact matching.
+        # Use md-dialog-scoped md-radio elements directly.
+        # Avoid page.get_by_role("radio") page-wide — it can match links outside
+        # the dialog that cause a page refresh (dismissing the dialog).
         selected = False
-        for locator in [
-            page.get_by_role("radio", name=re.compile(re.escape(gpu_type), re.I)),
-            page.locator("label").filter(has_text=gpu_type),
-            page.get_by_text(gpu_type, exact=True),
-            page.locator(f"text={gpu_type}"),
+
+        # Primary: use Playwright locators which pierce open shadow DOMs.
+        # JS document.querySelector cannot find elements inside shadow roots.
+        # Log what radio elements are visible to diagnose on failure.
+        all_radios = page.get_by_role("radio")
+        radio_count = await all_radios.count()
+        radio_names = []
+        for i in range(radio_count):
+            try:
+                r = all_radios.nth(i)
+                if await r.is_visible(timeout=300):
+                    nm = await r.evaluate("el => el.getAttribute('aria-label') || el.textContent.trim() || el.value || '?'")
+                    radio_names.append(nm)
+            except Exception:
+                pass
+        print(f"[trigger] Visible radios: {radio_names}", file=sys.stderr)
+
+        for selector, label in [
+            ("mat-radio-button", "mat-radio-button"),
+            ("mat-radio-group mat-radio-button", "mat-radio-group > mat-radio-button"),
+            ("mat-dialog-container mat-radio-button", "mat-dialog-container mat-radio-button"),
         ]:
             try:
-                if await locator.first.is_visible(timeout=3_000):
-                    await locator.first.click()
-                    print(f"[trigger] Selected radio: {gpu_type}.", file=sys.stderr)
+                loc = page.locator(selector).filter(has_text=gpu_type)
+                if await loc.count() > 0 and await loc.first.is_visible(timeout=1_000):
+                    await loc.first.click()
+                    print(f"[trigger] Selected radio via '{selector}'.", file=sys.stderr)
                     selected = True
                     break
             except Exception:
                 pass
 
         if not selected:
-            # Last resort: JS click by text content traversing shadow DOM
-            clicked = await page.evaluate(f"""() => {{
-                function findByText(root, text) {{
-                    for (const el of root.querySelectorAll('*')) {{
-                        if (el.shadowRoot) {{
-                            const f = findByText(el.shadowRoot, text);
-                            if (f) return f;
-                        }}
-                        if (el.textContent.trim() === text) {{
-                            const r = el.getBoundingClientRect();
-                            if (r.width > 0 && r.height > 0) return el;
-                        }}
-                    }}
-                    return null;
-                }}
-                const el = findByText(document, {repr(gpu_type)});
-                if (el) {{ el.click(); return true; }}
-                return false;
-            }}""")
-            if clicked:
-                print(f"[trigger] Selected radio via JS text search: {gpu_type}.", file=sys.stderr)
-                selected = True
+            # Fallback: page-wide ARIA radio with exact name match (safe, won't match links)
+            try:
+                radio = page.get_by_role("radio", name=re.compile(r"^\s*" + re.escape(gpu_type) + r"\s*$", re.I))
+                if await radio.first.is_visible(timeout=2_000):
+                    await radio.first.click()
+                    print(f"[trigger] Selected radio via ARIA name.", file=sys.stderr)
+                    selected = True
+            except Exception:
+                pass
 
         if not selected:
             await page.keyboard.press("Escape")
             print(f"[trigger] '{gpu_type}' radio not found — check account tier.", file=sys.stderr)
             return False
         await asyncio.sleep(0.5)
+        await _screenshot_process(page, "gpu_radio_selected")
 
         # ── Step 3b: handle unexpected "Disconnect and delete runtime" confirmation ─
         # With the disconnect-first strategy (Step 0), this dialog should not appear.
@@ -475,6 +817,7 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
             print("[trigger] No disconnect confirmation dialog — continuing.", file=sys.stderr)
 
         # ── Step 4: click Save ────────────────────────────────────────────────
+        # Use page-wide role search — the dialog is not <md-dialog> so scoping fails.
         save_btn = page.get_by_role("button", name="Save")
         try:
             await save_btn.click(timeout=5_000)
@@ -483,7 +826,10 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
             await page.keyboard.press("Escape")
             print("[trigger] Save button not found.", file=sys.stderr)
             return False
+        global _RUNTIME_TYPE_SAVE_GPU
+        _RUNTIME_TYPE_SAVE_GPU = gpu_type
         await asyncio.sleep(1.5)
+        await _screenshot_process(page, "gpu_save_clicked")
         return True
 
     except Exception as exc:
@@ -495,41 +841,85 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
         return False
 
 
+async def _connect_button_label(page) -> str:
+    """Lowercase label from colab-connect-button shadow (empty if unavailable)."""
+    try:
+        return await page.evaluate("""() => {
+            const host = document.querySelector('colab-connect-button');
+            if (!host || !host.shadowRoot) return '';
+            const btn = host.shadowRoot.querySelector('button');
+            return btn ? btn.textContent.trim().toLowerCase() : '';
+        }""")
+    except Exception:
+        return ""
+
+
 async def _runtime_is_live(page) -> bool:
-    """Return True if the page already shows an active or resuming runtime."""
-    live_selectors = [
-        "colab-usage-display", "text=RAM",
-        "[data-connected='true']", "colab-runtime-status",
-    ]
-    resuming_texts = ["Resuming session", "Connecting", "Initializing"]
-    for sel in live_selectors:
+    """Return True when a runtime session is connected or actively provisioning.
+
+    Colab can show L4 in the runtime chip while the top-right is still idle
+    "Connect" — `colab-runtime-status` alone must not count as live.
+    """
+    btn_text = await _connect_button_label(page)
+    if btn_text == "connect":
+        return False
+
+    for sel in ("colab-usage-display", "text=RAM", "[data-connected='true']"):
         try:
             el = await page.query_selector(sel)
             if el and await el.is_visible():
                 return True
         except Exception:
             pass
-    for text in resuming_texts:
+
+    for text in ("Resuming session", "Connecting", "Initializing"):
         try:
             el = await page.query_selector(f"text={text}")
             if el and await el.is_visible():
                 return True
         except Exception:
             pass
-    # Also check the connect button's shadow DOM text — "Connecting" appears
-    # inside the shadow root when a GPU runtime is provisioning.
-    try:
-        btn_text = await page.evaluate("""() => {
-            const host = document.querySelector('colab-connect-button');
-            if (!host || !host.shadowRoot) return '';
-            const btn = host.shadowRoot.querySelector('button');
-            return btn ? btn.textContent.trim().toLowerCase() : '';
-        }""")
-        if btn_text and btn_text != "connect":
-            return True  # e.g. "connecting", "initializing", "reconnecting"
-    except Exception:
-        pass
+
+    if btn_text:
+        return True
     return False
+
+
+
+async def _ensure_connect_if_idle(ctx, page, note: str) -> object:
+    """If UI is still on idle Connect, click it (GPU type can show L4 without a session)."""
+    page = _colab_page(ctx) or page
+    label = await _connect_button_label(page)
+    if label != "connect":
+        return page
+    print(f"[trigger] {note} — clicking Connect (runtime type was set but no session).", file=sys.stderr)
+    await _click_connect(page)
+    await asyncio.sleep(4)
+    page = _colab_page(ctx) or page
+    return await _handle_all_modals(ctx, page)
+
+
+
+
+async def _runtime_past_provisioning(page) -> bool:
+    """Return False while Colab UI still shows VM allocation (cells cannot run yet).
+
+    `colab-runtime-status` may be visible while the footer still says e.g. "Allocating runtime"
+    and the header shows "… Connecting" — we must not treat that as "connected".
+    """
+    try:
+        return await page.evaluate(
+            r"""() => {
+              const b = document.body ? document.body.innerText : '';
+              if (/Allocating runtime/i.test(b)) return false;
+              if (/Resuming session/i.test(b)) return false;
+              const head = b.slice(0, 3500);
+              if (/\u2026\s*Connecting|\.\.\.\s*Connecting/i.test(head)) return false;
+              return true;
+            }"""
+        )
+    except Exception:
+        return True
 
 
 async def _wait_runtime_connected(ctx):
@@ -539,6 +929,8 @@ async def _wait_runtime_connected(ctx):
         "[data-connected='true']", "colab-runtime-status",
     ]
     deadline = asyncio.get_event_loop().time() + RUNTIME_CONNECT_TIMEOUT
+    last_log = 0.0
+    last_shot = 0.0
     while asyncio.get_event_loop().time() < deadline:
         page = _colab_page(ctx)
         if page:
@@ -546,11 +938,44 @@ async def _wait_runtime_connected(ctx):
                 try:
                     el = await page.query_selector(sel)
                     if el and await el.is_visible():
+                        if not await _runtime_past_provisioning(page):
+                            continue
                         print(f"[trigger] Runtime live (via '{sel}').", file=sys.stderr)
                         return page
                 except Exception:
                     pass
-        await asyncio.sleep(3)
+            now = asyncio.get_event_loop().time()
+            # Viewport screenshot every 1s while waiting (for agent/human review).
+            if now - last_shot >= _SCREENSHOT_INTERVAL_SEC:
+                try:
+                    elapsed = int(now - (deadline - RUNTIME_CONNECT_TIMEOUT))
+                    await _screenshot_process(page, f"still_waiting_runtime_{elapsed}s")
+                except Exception:
+                    pass
+                last_shot = now
+            # Textual progress log every 10s (avoid noisy stderr).
+            if now - last_log >= 10.0:
+                try:
+                    btn_text = await page.evaluate("""() => {
+                        const host = document.querySelector('colab-connect-button');
+                        if (!host || !host.shadowRoot) return 'no-shadow';
+                        const btn = host.shadowRoot.querySelector('button');
+                        return btn ? btn.textContent.trim() : 'no-btn';
+                    }""")
+                    print(f"[trigger] Still waiting — connect button: '{btn_text}', page URL: {page.url[:80]}", file=sys.stderr)
+                except Exception:
+                    pass
+                last_log = now
+        await asyncio.sleep(1)
+    # Screenshots at timeout (numbered + legacy path for older tooling)
+    page = _colab_page(ctx)
+    if page:
+        try:
+            await _screenshot_process(page, "runtime_connect_timeout")
+            await page.screenshot(path="/tmp/colab_timeout.png", full_page=False)
+            print("[trigger] Screenshot also saved to /tmp/colab_timeout.png", file=sys.stderr)
+        except Exception:
+            pass
     raise RuntimeError(f"Runtime did not connect within {RUNTIME_CONNECT_TIMEOUT}s.")
 
 
@@ -643,13 +1068,56 @@ async def _handle_drive_auth_background(ctx) -> None:
         await asyncio.sleep(2)
 
 
-async def _wait_for_hostname_ntfy(start_epoch: int) -> str:
-    """Poll ntfy.sh for the hostname POSTed by the bootstrap notebook."""
+async def _hostname_from_frame(frame):
+    """Scan one frame's DOM + open shadow roots for trycloudflare hostname."""
+    try:
+        raw = await frame.evaluate(
+            r"""
+            () => {
+                const re = /[\w-]+\.trycloudflare\.com/;
+                function walk(node) {
+                    if (!node) return null;
+                    if (node.nodeType === 3) {
+                        const m = (node.textContent || '').match(re);
+                        if (m) return m[0];
+                    }
+                    if (node.shadowRoot) {
+                        const r = walk(node.shadowRoot);
+                        if (r) return r;
+                    }
+                    const kids = node.childNodes;
+                    if (kids) {
+                        for (let i = 0; i < kids.length; i++) {
+                            const r = walk(kids[i]);
+                            if (r) return r;
+                        }
+                    }
+                    return null;
+                }
+                const body = document.body;
+                if (!body) return null;
+                return walk(body);
+            }
+            """
+        )
+        if not raw:
+            return None
+        m = HOSTNAME_RE.search(raw)
+        return m.group(1).strip() if m else None
+    except Exception:
+        return None
+
+
+async def _wait_for_hostname_ntfy(ctx, start_epoch: int) -> str:
+    """Poll ntfy.sh for the hostname POSTed by the bootstrap notebook.
+
+    While polling, captures Colab viewport screenshots every `_SCREENSHOT_INTERVAL_SEC`
+    so long ntfy waits are still reviewable.
+    """
     import json
     import urllib.request
-    print(f"[trigger] Polling ntfy.sh for hostname (up to {HOSTNAME_WAIT_TIMEOUT}s)...", file=sys.stderr)
-    deadline = time.time() + HOSTNAME_WAIT_TIMEOUT
-    while time.time() < deadline:
+
+    def _poll_ntfy_once() -> str | None:
         try:
             url = f"https://ntfy.sh/{NTFY_TOPIC}/json?since={start_epoch}&poll=1"
             with urllib.request.urlopen(url, timeout=10) as resp:
@@ -659,15 +1127,32 @@ async def _wait_for_hostname_ntfy(start_epoch: int) -> str:
                     msg = json.loads(line)
                     hostname = msg.get("message", "").strip()
                     if HOSTNAME_RE.match(hostname):
-                        print(f"[trigger] Hostname received: {hostname}", file=sys.stderr)
                         return hostname
                 except Exception:
                     pass
         except Exception as e:
             print(f"[trigger] ntfy.sh poll error: {e}", file=sys.stderr)
-        await asyncio.sleep(NTFY_POLL_INTERVAL)
-    raise RuntimeError(f"Hostname not received via ntfy.sh after {HOSTNAME_WAIT_TIMEOUT}s.")
+        return None
 
+    print(f"[trigger] Polling ntfy.sh for hostname (up to {HOSTNAME_WAIT_TIMEOUT}s)...", file=sys.stderr)
+    deadline = time.time() + HOSTNAME_WAIT_TIMEOUT
+    next_poll = time.time()
+    last_shot = 0.0
+    t0 = time.time()
+    while time.time() < deadline:
+        now = time.time()
+        if now >= next_poll:
+            host = await asyncio.to_thread(_poll_ntfy_once)
+            if host:
+                print(f"[trigger] Hostname received: {host}", file=sys.stderr)
+                return host
+            next_poll = now + NTFY_POLL_INTERVAL
+        page = _colab_page(ctx)
+        if page and _PROCESS_SCREENSHOTS and (now - last_shot >= _SCREENSHOT_INTERVAL_SEC):
+            await _screenshot_process(page, f"ntfy_wait_{int(now - t0)}s")
+            last_shot = now
+        await asyncio.sleep(1)
+    raise RuntimeError(f"Hostname not received via ntfy.sh after {HOSTNAME_WAIT_TIMEOUT}s.")
 
 # ── Setup mode ────────────────────────────────────────────────────────────────
 
@@ -735,6 +1220,15 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
             if page is None:
                 raise RuntimeError("Colab page not found after Chrome launch.")
 
+            # Always navigate to NOTEBOOK_URL to pick up the latest code from GitHub.
+            # Chrome restores previous tabs — the tab's cell code may be stale (from
+            # before the last git push). Navigating ensures we always run current code.
+            print("[trigger] Loading notebook from GitHub (ensures latest cell code).", file=sys.stderr)
+            await page.goto(NOTEBOOK_URL, wait_until="load", timeout=90_000)
+
+            _screenshot_run_init()
+            global _RUNTIME_TYPE_SAVE_GPU
+            _RUNTIME_TYPE_SAVE_GPU = None
             print(f"[trigger] Colab page: {page.url}", file=sys.stderr)
             # Colab keeps long-lived connections; "networkidle" often never fires.
             await page.wait_for_load_state("load", timeout=90_000)
@@ -745,6 +1239,7 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
             print("[trigger] Colab shell ready (toolbar/connect present).", file=sys.stderr)
 
             page = await _handle_all_modals(ctx, page)
+            await _screenshot_process(page, "01_shell_ready")
 
             # Always set the GPU type first — even if a runtime is live.
             # If a different type is already running, _set_runtime_type_gpu handles
@@ -752,6 +1247,12 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
             # the old session so we can connect with the correct type.
             await _set_runtime_type_gpu(page, gpu_type=gpu_type)
             await asyncio.sleep(2)
+            page = _colab_page(ctx) or page
+            await _screenshot_process(page, "02_after_set_runtime_type_gpu")
+
+            page = await _ensure_connect_if_idle(
+                ctx, page, "After setting runtime type"
+            )
 
             # After potential disconnect from type change, check if still live.
             if await _runtime_is_live(page):
@@ -778,22 +1279,19 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
                     await _click_connect(page)
                     await asyncio.sleep(2)
 
+            page = _colab_page(ctx) or page
+            await _screenshot_process(page, "03_before_wait_runtime_connected")
             page = await _wait_runtime_connected(ctx)
             page = await _handle_all_modals(ctx, page)
+            await _screenshot_process(page, "04_runtime_connected")
+            await _assert_runtime_matches_gpu(page, gpu_type)
 
-            # Reload page to force Colab to fetch latest notebook content from GitHub.
-            # Without this, Colab may silently show a Drive-autosaved version (which
-            # can be stale if the notebook was edited locally and pushed to GitHub).
-            print("[trigger] Reloading page to fetch latest notebook content from GitHub...", file=sys.stderr)
-            await page.reload(wait_until="load")
-            await page.wait_for_selector(
-                "colab-connect-button, #connect, colab-toolbar-button",
-                timeout=60_000,
-            )
-            page = await _handle_all_modals(ctx, page)
-            # Runtime reconnects automatically after reload; wait for it to be live again.
-            page = await _wait_runtime_connected(ctx)
-            page = await _handle_all_modals(ctx, page)
+            # Skip page reload: the notebook was opened from the GitHub URL directly,
+            # so content is already correct. Reloading resets Colab Secrets permissions
+            # causing userdata.get('NTFY_TOPIC') to fail with SecretNotFoundError.
+            page = _colab_page(ctx) or page
+            await _screenshot_process(page, "05_pre_run")
+            await _assert_runtime_matches_gpu(page, gpu_type)
 
             start_epoch = int(time.time())
             await page.keyboard.press("Control+F9")
@@ -802,22 +1300,27 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
             # "Run anyway" often appears only after Run all (localized UI).
             page = _colab_page(ctx) or page
             page = await _handle_all_modals(ctx, page)
+            await _screenshot_process(page, "06_after_run_all_modals")
 
             # Run Drive OAuth handler concurrently with hostname polling.
             # drive.mount() opens an accounts.google.com/oauth popup; the
             # handler clicks Allow so Drive mounts without user interaction.
             drive_auth_task = asyncio.create_task(_handle_drive_auth_background(ctx))
             try:
-                hostname = await _wait_for_hostname_ntfy(start_epoch)
+                hostname = await _wait_for_hostname_ntfy(ctx, start_epoch)
                 # Grace period: drive.mount() runs in the next cell and may open a
                 # Google OAuth popup (accounts.google.com/signin/oauth/id) after the
                 # hostname is already received. Keep the auth handler alive so it can
                 # click Continue without human interaction.
                 print("[trigger] Hostname received; waiting for Drive OAuth to complete (60s)...", file=sys.stderr)
+                page = _colab_page(ctx) or page
+                await _screenshot_process(page, "07_hostname_received")
                 await asyncio.sleep(60)
             finally:
                 drive_auth_task.cancel()
 
+            page = _colab_page(ctx) or page
+            await _screenshot_process(page, "08_before_return_success")
             return hostname
     finally:
         chrome_proc.kill()  # SIGKILL: force-close Chrome without triggering beforeunload ("Leave site?")
@@ -832,11 +1335,41 @@ def main():
     parser.add_argument("--gpu", default="T4 GPU", metavar="TYPE",
                         help="Hardware accelerator label as shown in Colab (default: 'T4 GPU'). "
                              "Examples: 'T4 GPU', 'L4 GPU', 'A100 GPU', 'None'")
+    parser.add_argument(
+        "--debug-dialog",
+        action="store_true",
+        help="Log md-text-button snapshots when resolving disconnect / runtime-change OK clicks.",
+    )
+    parser.add_argument(
+        "--no-screenshots",
+        action="store_true",
+        help="Disable progress PNG screenshots (default: write colab_trigger_* under /tmp).",
+    )
+    parser.add_argument(
+        "--screenshot-dir",
+        default=None,
+        metavar="DIR",
+        help="Directory for progress screenshots (default: /tmp).",
+    )
+    parser.add_argument(
+        "--screenshot-interval",
+        type=float,
+        default=1.0,
+        metavar="SEC",
+        help="Minimum seconds between automatic viewport screenshots during waits (default: 1).",
+    )
     args = parser.parse_args()
 
     if args.setup:
         run_setup()
         sys.exit(0)
+
+    global _DEBUG_DIALOG, _PROCESS_SCREENSHOTS, _SCREENSHOT_DIR, _SCREENSHOT_INTERVAL_SEC
+    _DEBUG_DIALOG = bool(args.debug_dialog)
+    _PROCESS_SCREENSHOTS = not bool(args.no_screenshots)
+    if args.screenshot_dir:
+        _SCREENSHOT_DIR = Path(args.screenshot_dir).expanduser()
+    _SCREENSHOT_INTERVAL_SEC = max(0.25, float(args.screenshot_interval))
 
     try:
         hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu))

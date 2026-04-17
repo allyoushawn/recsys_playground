@@ -129,6 +129,12 @@ async def _test_hostname_iframe(tcb) -> None:
 
 async def main() -> int:
     tcb = _load_trigger_module()
+    # Sync checks (no browser): accelerator token parsing for GPU verify
+    assert tcb._gpu_match_keyword("T4 GPU") == "T4"
+    assert tcb._gpu_match_keyword("  L4 GPU ") == "L4"
+    assert tcb._gpu_match_keyword("None") is None
+    print("[validate] gpu keyword mapping OK", flush=True)
+
     tests = [
         ("en trusted modal", _test_en_trusted_modal(tcb)),
         ("zh-TW trusted modal", _test_zh_tw_trusted_modal(tcb)),
