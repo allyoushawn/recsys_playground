@@ -338,8 +338,14 @@ async def _dismiss_trusted_notebook_warning(page):
     return False
 
 
+async def _dismiss_disallowed_warning(page) -> bool:
+    """Dismiss Colab's 'you may be executing disallowed code' warning → 'Continue anyway'."""
+    return await _handle_modal(page, "executing code that is disallowed", "Continue anyway", timeout_ms=2_000)
+
+
 async def _handle_all_modals(ctx, page):
     await _dismiss_trusted_notebook_warning(page)
+    await _dismiss_disallowed_warning(page)
     for text in ["Dismiss", "Got it", "No thanks"]:
         try:
             btn = page.locator(f"text={text}").first
@@ -945,7 +951,15 @@ async def _wait_runtime_connected(ctx):
                 except Exception:
                     pass
             now = asyncio.get_event_loop().time()
-            # Viewport screenshot every 1s while waiting (for agent/human review).
+            # Retry connect if "Unable to connect" toast is visible.
+            try:
+                if await page.locator("text=Unable to connect to the runtime").first.is_visible(timeout=500):
+                    print("[trigger] 'Unable to connect' toast detected — retrying connect click.", file=sys.stderr)
+                    await _click_connect(page)
+                    await asyncio.sleep(3)
+            except Exception:
+                pass
+            # Viewport screenshot every _SCREENSHOT_INTERVAL_SEC while waiting.
             if now - last_shot >= _SCREENSHOT_INTERVAL_SEC:
                 try:
                     elapsed = int(now - (deadline - RUNTIME_CONNECT_TIMEOUT))
@@ -1148,9 +1162,12 @@ async def _wait_for_hostname_ntfy(ctx, start_epoch: int) -> str:
                 return host
             next_poll = now + NTFY_POLL_INTERVAL
         page = _colab_page(ctx)
-        if page and _PROCESS_SCREENSHOTS and (now - last_shot >= _SCREENSHOT_INTERVAL_SEC):
-            await _screenshot_process(page, f"ntfy_wait_{int(now - t0)}s")
-            last_shot = now
+        if page:
+            await _dismiss_trusted_notebook_warning(page)
+            await _dismiss_disallowed_warning(page)
+            if _PROCESS_SCREENSHOTS and (now - last_shot >= _SCREENSHOT_INTERVAL_SEC):
+                await _screenshot_process(page, f"ntfy_wait_{int(now - t0)}s")
+                last_shot = now
         await asyncio.sleep(1)
     raise RuntimeError(f"Hostname not received via ntfy.sh after {HOSTNAME_WAIT_TIMEOUT}s.")
 
