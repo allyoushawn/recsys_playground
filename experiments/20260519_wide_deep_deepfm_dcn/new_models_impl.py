@@ -37,10 +37,15 @@ def _kaiming_init(module):
 
 
 def _build_offsets(field_cardinalities):
+    # +1 per field: vocab maps to [1..card], 0 is OOV; each field needs card+1 slots
     offsets = [0]
     for c in field_cardinalities[:-1]:
-        offsets.append(offsets[-1] + c)
+        offsets.append(offsets[-1] + int(c) + 1)
     return torch.tensor(offsets, dtype=torch.long)
+
+
+def _total_vocab(field_cardinalities):
+    return sum(int(c) + 1 for c in field_cardinalities)
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +70,7 @@ class WideAndDeepModel(nn.Module):
     def __init__(self, field_cardinalities, num_dense, embed_dim=18,
                  deep_dims=(360, 200, 80), dropout=0.0, **kwargs):
         super().__init__()
-        total_vocab = sum(field_cardinalities)
+        total_vocab = _total_vocab(field_cardinalities)
         self.register_buffer('_offsets', _build_offsets(field_cardinalities))
 
         self.embedding = nn.Embedding(total_vocab, embed_dim, padding_idx=0)
@@ -123,7 +128,7 @@ class DeepFMModel(nn.Module):
     def __init__(self, field_cardinalities, num_dense, embed_dim=18,
                  dnn_dims=(360, 200, 80), dropout=0.0, **kwargs):
         super().__init__()
-        total_vocab = sum(field_cardinalities)
+        total_vocab = _total_vocab(field_cardinalities)
         self.register_buffer('_offsets', _build_offsets(field_cardinalities))
 
         # FM / DNN shared embeddings
@@ -208,7 +213,7 @@ class DCNv2Model(nn.Module):
     def __init__(self, field_cardinalities, num_dense, embed_dim=18,
                  num_cross_layers=3, deep_dims=(360, 200, 80), dropout=0.0, **kwargs):
         super().__init__()
-        total_vocab = sum(field_cardinalities)
+        total_vocab = _total_vocab(field_cardinalities)
         self.register_buffer('_offsets', _build_offsets(field_cardinalities))
 
         self.embedding = nn.Embedding(total_vocab, embed_dim, padding_idx=0)

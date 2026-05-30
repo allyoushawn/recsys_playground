@@ -1,4 +1,0 @@
-interface:
-  display_name: "GPU Code Review"
-  short_description: "Review DL code for proper GPU usage"
-  default_prompt: "Use $gpu-review to check this deep learning code for proper GPU utilization."

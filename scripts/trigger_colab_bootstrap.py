@@ -1196,7 +1196,7 @@ def run_setup():
 
 # ── Normal run ────────────────────────────────────────────────────────────────
 
-async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
+async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False) -> str:
     if not COLAB_PROFILE.exists():
         raise RuntimeError(
             f"Profile not found at {COLAB_PROFILE}.\n"
@@ -1338,9 +1338,12 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU") -> str:
 
             page = _colab_page(ctx) or page
             await _screenshot_process(page, "08_before_return_success")
+            if keep_chrome:
+                print(f"[trigger] Keeping Chrome alive (PID {chrome_proc.pid}) for Colab websocket.", file=sys.stderr)
             return hostname
     finally:
-        chrome_proc.kill()  # SIGKILL: force-close Chrome without triggering beforeunload ("Leave site?")
+        if not keep_chrome:
+            chrome_proc.kill()  # SIGKILL: force-close Chrome without triggering beforeunload ("Leave site?")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -1375,6 +1378,11 @@ def main():
         metavar="SEC",
         help="Minimum seconds between automatic viewport screenshots during waits (default: 1).",
     )
+    parser.add_argument(
+        "--keep-chrome",
+        action="store_true",
+        help="Keep Chrome running after hostname is returned (maintains Colab websocket for long-running jobs).",
+    )
     args = parser.parse_args()
 
     if args.setup:
@@ -1389,7 +1397,7 @@ def main():
     _SCREENSHOT_INTERVAL_SEC = max(0.25, float(args.screenshot_interval))
 
     try:
-        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu))
+        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu, keep_chrome=args.keep_chrome))
         print(hostname)
         sys.exit(0)
     except Exception as e:

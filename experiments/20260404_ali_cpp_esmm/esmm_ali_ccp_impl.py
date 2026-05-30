@@ -733,7 +733,7 @@ class ESMMModel(nn.Module):
 # --------------- ESMM variants (shared bottom / MMoE / PLE) ---------------
 
 def _init_linear(layer: nn.Linear) -> None:
-    nn.init.kaiming_uniform_(layer.weight, a=5 ** 0.5)
+    nn.init.kaiming_uniform_(layer.weight, nonlinearity='relu')
     if layer.bias is not None:
         nn.init.zeros_(layer.bias)
 
@@ -853,6 +853,7 @@ class ESMM_SharedBottom(nn.Module):
             off += int(card) + 1
         self.register_buffer('field_offsets', torch.tensor(offsets, dtype=torch.long).view(1, -1))
         self.unified_emb = nn.Embedding(off, embed_dim)
+        nn.init.normal_(self.unified_emb.weight, 0.0, 0.01)
         input_dim = self.num_fields * embed_dim + num_dense
         trunk_layers = []
         prev = input_dim
@@ -860,6 +861,9 @@ class ESMM_SharedBottom(nn.Module):
             trunk_layers += [nn.Linear(prev, h), nn.ReLU()]
             prev = h
         self.shared_trunk = nn.Sequential(*trunk_layers)
+        for m in self.shared_trunk.modules():
+            if isinstance(m, nn.Linear):
+                _init_linear(m)
         self.ctr_head = nn.Linear(prev, 1)
         self.cvr_head = nn.Linear(prev, 1)
         _init_linear(self.ctr_head)
@@ -900,6 +904,7 @@ class ESMM_MMoE(nn.Module):
             off += int(card) + 1
         self.register_buffer('field_offsets', torch.tensor(offsets, dtype=torch.long).view(1, -1))
         self.unified_emb = nn.Embedding(off, embed_dim)
+        nn.init.normal_(self.unified_emb.weight, 0.0, 0.01)
         d_in = self.num_fields * embed_dim + num_dense
         E = int(num_experts)
         self.experts = nn.ModuleList(
@@ -957,6 +962,7 @@ class ESMM_PLE(nn.Module):
             off += int(card) + 1
         self.register_buffer('field_offsets', torch.tensor(offsets, dtype=torch.long).view(1, -1))
         self.unified_emb = nn.Embedding(off, embed_dim)
+        nn.init.normal_(self.unified_emb.weight, 0.0, 0.01)
         d_in = self.num_fields * embed_dim + num_dense
         ns, nt = int(num_shared_experts), int(num_task_experts)
         self.level1 = _ESMM_PLELevel(

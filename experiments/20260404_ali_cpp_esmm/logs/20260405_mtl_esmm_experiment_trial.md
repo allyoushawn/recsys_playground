@@ -316,3 +316,32 @@ leaderboard_rows_appended:
     comparability: canonical
 auto_unblock_notes: []
 ```
+
+---
+
+## Session: 2026-05-19 — Autonomous Agent Validation Run
+
+### Summary
+Autonomous Claude agent (achieve-goal + run-notebook-on-colab skills) bootstrapped a fresh Colab T4 session, prepared the experiment notebook, and launched a full 4-model comparison run to validate prior canonical results.
+
+### Setup
+- Notebook: `experiments/20260404_ali_cpp_esmm/20260404_esmm_experiment.ipynb`
+- Config change: all `RUN_*` flags set to True, `CLEAN_EXPERIMENT_JSON` cleared all 4 model caches
+- Commit: sha `8e29627`
+- Colab hostname: `first-trademark-julia-pamela.trycloudflare.com` (Tesla T4)
+- Papermill PID: 2641, started 2026-05-19
+
+### Prior Canonical Results (from trial log — 5-epoch full-data runs)
+
+| Model | CTCVR_AUC | CVR_AUC | CTR_AUC | Wall (s) | Tag |
+|-------|-----------|---------|---------|----------|-----|
+| ESMM_K_ref | 0.6114 | 0.6458 | — | ~1961 | canonical |
+| ESMM_SharedBottom | 0.5925 | 0.6298 | 0.6076 | ~1957 | canonical |
+| ESMM_MMoE | **0.6164** | **0.6620** | 0.6086 | ~2120 | canonical |
+| ESMM_PLE | 0.5896 | 0.6178 | 0.6084 | ~2389 | canonical |
+
+**Best model: ESMM_MMoE** (CTCVR_AUC = 0.6164, +0.0050 vs baseline)
+
+### Validation Run Status
+- In progress on Colab T4 as of 2026-05-19
+- Will update with fresh results when complete
