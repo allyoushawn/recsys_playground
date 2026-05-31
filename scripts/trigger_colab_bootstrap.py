@@ -57,7 +57,7 @@ _RUNTIME_TYPE_SAVE_GPU: str | None = None
 
 NOTEBOOK_URL = (
     "https://colab.research.google.com/github/allyoushawn/recsys_playground"
-    "/blob/main/notebooks/ad_hoc/colab_ssh_bootstrap.ipynb"
+    "/blob/main/notebooks/ad_hoc/colab_ssh_bootstrap.ipynb?flush_cache=true"
 )
 
 CHROME_BIN = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -1196,14 +1196,15 @@ def run_setup():
 
 # ── Normal run ────────────────────────────────────────────────────────────────
 
-async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False) -> str:
+async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False, notebook_url: str | None = None) -> str:
     if not COLAB_PROFILE.exists():
         raise RuntimeError(
             f"Profile not found at {COLAB_PROFILE}.\n"
             "Run --setup first: python3 scripts/trigger_colab_bootstrap.py --setup"
         )
 
-    chrome_proc = _launch_chrome(NOTEBOOK_URL)
+    _target_url = notebook_url or NOTEBOOK_URL
+    chrome_proc = _launch_chrome(_target_url)
     try:
         await _wait_for_cdp()
         print("[trigger] CDP ready. Connecting Playwright...", file=sys.stderr)
@@ -1237,11 +1238,11 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False)
             if page is None:
                 raise RuntimeError("Colab page not found after Chrome launch.")
 
-            # Always navigate to NOTEBOOK_URL to pick up the latest code from GitHub.
+            # Always navigate to the target URL to pick up the latest code.
             # Chrome restores previous tabs — the tab's cell code may be stale (from
-            # before the last git push). Navigating ensures we always run current code.
-            print("[trigger] Loading notebook from GitHub (ensures latest cell code).", file=sys.stderr)
-            await page.goto(NOTEBOOK_URL, wait_until="load", timeout=90_000)
+            # before the last sync). Navigating ensures we always run current code.
+            print(f"[trigger] Loading notebook from {_target_url[:80]}...", file=sys.stderr)
+            await page.goto(_target_url, wait_until="load", timeout=90_000)
 
             _screenshot_run_init()
             global _RUNTIME_TYPE_SAVE_GPU
@@ -1383,6 +1384,13 @@ def main():
         action="store_true",
         help="Keep Chrome running after hostname is returned (maintains Colab websocket for long-running jobs).",
     )
+    parser.add_argument(
+        "--notebook-url",
+        default=None,
+        metavar="URL",
+        help="Override the Colab notebook URL (default: GitHub-hosted bootstrap notebook). "
+             "Use a Drive URL like https://colab.research.google.com/drive/<FILE_ID> to iterate without GitHub commits.",
+    )
     args = parser.parse_args()
 
     if args.setup:
@@ -1397,7 +1405,7 @@ def main():
     _SCREENSHOT_INTERVAL_SEC = max(0.25, float(args.screenshot_interval))
 
     try:
-        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu, keep_chrome=args.keep_chrome))
+        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu, keep_chrome=args.keep_chrome, notebook_url=args.notebook_url))
         print(hostname)
         sys.exit(0)
     except Exception as e:
