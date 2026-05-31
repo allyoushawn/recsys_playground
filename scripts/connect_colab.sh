@@ -9,5 +9,6 @@ HOST=${1:?"Usage: $0 <cloudflared-hostname>"}
 
 ssh -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o IdentityFile=~/.ssh/colab_key \
     -o ProxyCommand="cloudflared access ssh --hostname $HOST" \
     root@"$HOST"
