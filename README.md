@@ -2,6 +2,18 @@
 
 A multi-project workspace for recommender systems research prototypes. Each project is self-contained with its own `src/`, `tests/`, and Colab-friendly notebooks under `notebooks/`.
 
+## Datasets (read first)
+
+**[`DATASETS.md`](./DATASETS.md) is the single source of truth** for which datasets are experiment-ready, for which models, where the data/cache lives on Drive, and what to build next. Check it before starting any modeling work.
+
+| Dataset | Solves | Ready for | Status |
+|---|---|---|---|
+| **Ali-CCP** | CTR / CVR / CTCVR | ESMM, SharedBottom, MMoE, PLE, Wide&Deep, DeepFM, DCNv2 | ✅ ready now |
+| **Amazon Video Games** | rating regression (1–5) | regression MLP/MF/NeuMF, DCNv2, PLE heads | ⚠️ partial (not CTR/ranking/DIN) |
+| **Amazon Beauty (TIGER)** | generative semantic-ID retrieval | RQ-VAE + seq2seq SemanticID, LLM-SID | ⚠️ partial (not wired to DCN/DIN/DeepFM) |
+
+**Routing:** Wide&Deep / DeepFM / DCN and ESMM / MMoE / PLE → Ali-CCP (ready). DIN → not ready (needs an Amazon sequence datamodule with negative sampling). SASRec / BERT4Rec / GRU4Rec / TIGER → Amazon Beauty / Video_Games. See [`DATASETS.md`](./DATASETS.md) for the standard cache contract and the sequenced build plan.
+
 ## Projects
 
 - MovieLens‑100K (`movie_lens_100k/`)
