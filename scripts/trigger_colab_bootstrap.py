@@ -656,13 +656,14 @@ async def _disconnect_runtime(page) -> bool:
     return False
 
 
-async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
+async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU", high_ram: bool = False) -> bool:
     """Disconnect any running runtime, then set the hardware accelerator type.
 
     Strategy:
     1. If a runtime is live, disconnect it first (avoids the confirmation overlay
        that appears when changing type with an active session).
-    2. Open Connect dropdown → Change runtime type → select radio → Save.
+    2. Open Connect dropdown → Change runtime type → select GPU radio → optionally
+       select High-RAM shape → Save.
 
     Returns True if the runtime type was set, False otherwise.
     """
@@ -793,6 +794,39 @@ async def _set_runtime_type_gpu(page, gpu_type: str = "T4 GPU") -> bool:
             return False
         await asyncio.sleep(0.5)
         await _screenshot_process(page, "gpu_radio_selected")
+
+        # ── Step 3c: select High-RAM shape if requested ───────────────────────
+        if high_ram:
+            hr_selected = False
+            for selector, label in [
+                ("mat-radio-button", "mat-radio-button"),
+                ("mat-radio-group mat-radio-button", "mat-radio-group > mat-radio-button"),
+                ("mat-dialog-container mat-radio-button", "mat-dialog-container mat-radio-button"),
+            ]:
+                try:
+                    loc = page.locator(selector).filter(has_text=re.compile(r"High.RAM", re.I))
+                    if await loc.count() > 0 and await loc.first.is_visible(timeout=1_000):
+                        await loc.first.click()
+                        print("[trigger] Selected High-RAM radio.", file=sys.stderr)
+                        hr_selected = True
+                        break
+                except Exception:
+                    pass
+
+            if not hr_selected:
+                # Fallback: ARIA radio name match
+                try:
+                    radio = page.get_by_role("radio", name=re.compile(r"High.RAM", re.I))
+                    if await radio.first.is_visible(timeout=2_000):
+                        await radio.first.click()
+                        print("[trigger] Selected High-RAM radio via ARIA.", file=sys.stderr)
+                        hr_selected = True
+                except Exception:
+                    pass
+
+            if not hr_selected:
+                print("[trigger] High-RAM radio not found (not available on this account/tier) — continuing with standard RAM.", file=sys.stderr)
+            await asyncio.sleep(0.5)
 
         # ── Step 3b: handle unexpected "Disconnect and delete runtime" confirmation ─
         # With the disconnect-first strategy (Step 0), this dialog should not appear.
@@ -1196,7 +1230,7 @@ def run_setup():
 
 # ── Normal run ────────────────────────────────────────────────────────────────
 
-async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False, notebook_url: str | None = None) -> str:
+async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False, notebook_url: str | None = None, high_ram: bool = False) -> str:
     if not COLAB_PROFILE.exists():
         raise RuntimeError(
             f"Profile not found at {COLAB_PROFILE}.\n"
@@ -1263,7 +1297,7 @@ async def trigger_bootstrap(gpu_type: str = "T4 GPU", keep_chrome: bool = False,
             # If a different type is already running, _set_runtime_type_gpu handles
             # the "Disconnect and delete runtime" confirmation, which disconnects
             # the old session so we can connect with the correct type.
-            await _set_runtime_type_gpu(page, gpu_type=gpu_type)
+            await _set_runtime_type_gpu(page, gpu_type=gpu_type, high_ram=high_ram)
             await asyncio.sleep(2)
             page = _colab_page(ctx) or page
             await _screenshot_process(page, "02_after_set_runtime_type_gpu")
@@ -1357,6 +1391,12 @@ def main():
                         help="Hardware accelerator label as shown in Colab (default: 'T4 GPU'). "
                              "Examples: 'T4 GPU', 'L4 GPU', 'A100 GPU', 'None'")
     parser.add_argument(
+        "--high-ram",
+        action="store_true",
+        default=False,
+        help="Select the High-RAM runtime shape in the Change-runtime-type dialog (if available on the account).",
+    )
+    parser.add_argument(
         "--debug-dialog",
         action="store_true",
         help="Log md-text-button snapshots when resolving disconnect / runtime-change OK clicks.",
@@ -1405,7 +1445,7 @@ def main():
     _SCREENSHOT_INTERVAL_SEC = max(0.25, float(args.screenshot_interval))
 
     try:
-        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu, keep_chrome=args.keep_chrome, notebook_url=args.notebook_url))
+        hostname = asyncio.run(trigger_bootstrap(gpu_type=args.gpu, keep_chrome=args.keep_chrome, notebook_url=args.notebook_url, high_ram=args.high_ram))
         print(hostname)
         sys.exit(0)
     except Exception as e:

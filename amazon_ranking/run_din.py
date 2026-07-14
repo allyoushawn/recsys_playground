@@ -135,10 +135,20 @@ def main() -> None:
     p.add_argument("--n-eval-negatives", type=int, default=100)
     p.add_argument("--n-train-negatives", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--cache-dir", default=None, help="directory for per-model result cache JSONs")
     args = p.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     t_start = time.time()
+
+    # Global seeding before any data work so train/negative splits are seed-specific.
+    import random as _random
+    import numpy as _np_seed
+    _random.seed(args.seed)
+    _np_seed.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     reviews = load_reviews(args)
     print(
@@ -167,10 +177,12 @@ def main() -> None:
 
     # Per-model result cache so a runtime death (the ~77-min Colab pattern) only
     # costs the in-flight model: completed models are reloaded and skipped on resume.
-    cache_dir = os.path.dirname(args.out) if args.out else "."
+    cache_dir = args.cache_dir if args.cache_dir else (os.path.dirname(args.out) if args.out else ".")
 
     def _pm_path(name):
-        return os.path.join(cache_dir or ".", f"{dataset_name}_{name}_result.json")
+        # Include seed so each run writes its own cache file and no cross-seed
+        # contamination occurs when the caller iterates over seeds with a shared cache_dir.
+        return os.path.join(cache_dir or ".", f"{dataset_name}_{name}_seed{args.seed}_result.json")
 
     results = {}
     for name in models:
