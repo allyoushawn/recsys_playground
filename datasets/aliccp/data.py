@@ -1,17 +1,16 @@
 """Ali-CCP dataset layer: raw-CSV parsing, Parquet I/O, vocab building, normalization.
 
-Extracted (E1) from `experiments/20260404_ali_cpp_esmm/esmm_ali_ccp_impl.py` so any
-(non-ESMM) model can use the Ali-CCP dataset WITHOUT importing torch/model code.
-This module is TORCH-FREE: stdlib + numpy + pandas + (lazy) pyarrow only.
+Part of the `datasets.aliccp` package (see the package README.md). This module is
+TORCH-FREE: stdlib + numpy + pandas + (lazy) pyarrow only.
+The torch tensorizers live in `encode.py` and must be imported explicitly so that
+importing this module never pulls in torch.
 """
 from __future__ import annotations
 
 import gc
 import os
 import pickle
-import tarfile
 from collections import Counter
-from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
@@ -48,49 +47,11 @@ ALICCP_DENSE_FEAT_COLS = ['D' + c for c in ALICCP_DENSE_COLS]
 
 
 def _sample_tag_for_cache(sample_size):
+    """Cache-filename tag for a given sample_size ('full' when None). Restored for
+    compatibility: experiments/20260404_ali_cpp_esmm/esmm_ali_ccp_impl.py imports this
+    name explicitly even though it has no other caller in this package."""
     return 'full' if sample_size is None else str(sample_size)
 
-def load_or_parse_ali_ccp(data_dir, sample_size, processed_dir, sparse_cols, dense_cols, dense_feat_cols):
-    """Load Parquet from processed_dir if present; else parse raw Tianchi CSVs and save."""
-    os.makedirs(processed_dir, exist_ok=True)
-    tag = _sample_tag_for_cache(sample_size)
-    p_train = os.path.join(processed_dir, f'parsed_train_rows_{tag}.parquet')
-    p_test = os.path.join(processed_dir, f'parsed_test_rows_{tag}.parquet')
-    # Reuse legacy Parquet from older notebook layout (…/data/esmm_cache/) if present.
-    if tag == 'full' and not (os.path.isfile(p_train) and os.path.isfile(p_test)):
-        _legacy = os.path.join(os.path.dirname(os.path.abspath(data_dir)), 'esmm_cache')
-        _lt, _le = os.path.join(_legacy, 'ali_ccp_full_train.parquet'), os.path.join(_legacy, 'ali_ccp_full_test.parquet')
-        if os.path.isfile(_lt) and os.path.isfile(_le):
-            import shutil
-            print(f'Copying full split from legacy {_legacy} -> {processed_dir}')
-            shutil.copy2(_lt, p_train)
-            shutil.copy2(_le, p_test)
-    if os.path.isfile(p_train) and os.path.isfile(p_test):
-        print(f'Loading cached parsed AliCCP (sample={tag}) from {processed_dir}')
-        if sample_size is None:
-            print('  Full split: not calling pd.read_parquet (avoids ~40GB+ RAM). Use Parquet paths in Round 4.')
-            return None, None
-        return pd.read_parquet(p_train), pd.read_parquet(p_test)
-    print(f'No Parquet cache for sample={tag}; parsing raw Tianchi files (slow)...')
-    if sample_size is None:
-        parse_raw_ali_ccp_streaming_writes(
-            data_dir, p_train, p_test, sample_size=None,
-            sparse_cols=sparse_cols, dense_cols=dense_cols, dense_feat_cols=dense_feat_cols,
-        )
-        print('  Full Parquet written. Returning (None, None) to avoid read_parquet OOM.')
-        return None, None
-    df_tr, df_te = parse_raw_ali_ccp(
-        data_dir,
-        sample_size=sample_size,
-        sparse_cols=sparse_cols,
-        dense_cols=dense_cols,
-        dense_feat_cols=dense_feat_cols,
-    )
-    if df_tr is not None and len(df_tr) > 0:
-        print(f'Writing Parquet cache to {processed_dir} (snappy compression)...')
-        df_tr.to_parquet(p_train, index=False, compression='snappy')
-        df_te.to_parquet(p_test, index=False, compression='snappy')
-    return df_tr, df_te
 
 def _find_file_recursive(root, filename):
     direct = os.path.join(root, filename)
@@ -103,6 +64,7 @@ def _find_file_recursive(root, filename):
 
 
 find_file_recursive = _find_file_recursive
+
 
 def _parse_feat_str(feat_str, sparse_cols, dense_cols):
     feat_dict = {}
@@ -119,70 +81,6 @@ def _parse_feat_str(feat_str, sparse_cols, dense_cols):
             if filed in dense_cols:
                 feat_dict['D' + filed] = val
     return feat_dict
-
-def parse_raw_ali_ccp(
-    data_dir, sample_size=None, sparse_cols=None, dense_cols=None, dense_feat_cols=None,
-):
-    common_train_path = _find_file_recursive(data_dir, COMMON_FEATURES_TRAIN)
-    common_test_path = _find_file_recursive(data_dir, COMMON_FEATURES_TEST)
-    skeleton_train_path = _find_file_recursive(data_dir, SAMPLE_SKELETON_TRAIN)
-    skeleton_test_path = _find_file_recursive(data_dir, SAMPLE_SKELETON_TEST)
-    if not all([common_train_path, common_test_path, skeleton_train_path, skeleton_test_path]):
-        return None, None
-
-    test_limit = (sample_size // 4) if sample_size else None
-
-    needed_ids = set()
-    for path, limit, mode in [
-        (skeleton_train_path, sample_size, 'train'),
-        (skeleton_test_path, test_limit, 'test'),
-    ]:
-        with open(path, 'r') as f:
-            for i, line in enumerate(tqdm(f, desc=f'scan_skeleton_{mode}', leave=False)):
-                if limit and i >= limit:
-                    break
-                parts = line.strip().split(',')
-                if len(parts) >= 4:
-                    needed_ids.add(parts[3])
-    print(f'Unique common-feature IDs needed: {len(needed_ids):,}')
-
-    common_feat = {}
-    for path, mode in [(common_train_path, 'train'), (common_test_path, 'test')]:
-        with open(path, 'r') as f:
-            for line in tqdm(f, desc=f'common_features_{mode}', leave=False):
-                parts = line.strip().split(',')
-                if len(parts) < 3:
-                    continue
-                if parts[0] not in needed_ids:
-                    continue
-                feat_dict = _parse_feat_str(parts[2], sparse_cols, dense_cols)
-                common_feat[parts[0]] = feat_dict
-    print(f'Loaded {len(common_feat):,} common-feature entries')
-
-    rows_train, rows_test = [], []
-    for path, rows_out, limit, mode in [
-        (skeleton_train_path, rows_train, sample_size, 'train'),
-        (skeleton_test_path, rows_test, test_limit, 'test'),
-    ]:
-        with open(path, 'r') as f:
-            for i, line in enumerate(tqdm(f, desc=f'sample_skeleton_{mode}', leave=False)):
-                if limit and i >= limit:
-                    break
-                parts = line.strip().split(',')
-                if len(parts) < 6:
-                    continue
-                click, purchase = parts[1], parts[2]
-                if click == '0' and purchase == '1':
-                    continue
-                feat_dict = _parse_feat_str(parts[5], sparse_cols, dense_cols)
-                feat_dict.update(common_feat.get(parts[3], {}))
-                row = {'click': click, 'purchase': purchase}
-                for k in sparse_cols + dense_feat_cols:
-                    row[k] = feat_dict.get(k, '0')
-                rows_out.append(row)
-    df_train = pd.DataFrame(rows_train)
-    df_test = pd.DataFrame(rows_test)
-    return df_train, df_test
 
 
 def parse_raw_ali_ccp_streaming_writes(
@@ -433,17 +331,9 @@ def stream_normalize_parquet(
 
 def ensure_full_split_parquet_streaming(data_dir, processed_dir, sparse_cols, dense_cols, dense_feat_cols):
     """Paths to full train/test Parquet; streaming-parse if missing."""
-    import shutil
     os.makedirs(processed_dir, exist_ok=True)
     p_train = os.path.join(processed_dir, 'parsed_train_rows_full.parquet')
     p_test = os.path.join(processed_dir, 'parsed_test_rows_full.parquet')
-    if not (os.path.isfile(p_train) and os.path.isfile(p_test)):
-        _legacy = os.path.join(os.path.dirname(os.path.abspath(data_dir)), 'esmm_cache')
-        _lt, _le = os.path.join(_legacy, 'ali_ccp_full_train.parquet'), os.path.join(_legacy, 'ali_ccp_full_test.parquet')
-        if os.path.isfile(_lt) and os.path.isfile(_le):
-            print(f'Copying legacy full split -> {processed_dir}')
-            shutil.copy2(_lt, p_train)
-            shutil.copy2(_le, p_test)
     if os.path.isfile(p_train) and os.path.isfile(p_test):
         return p_train, p_test
     print('Streaming parse: raw Tianchi -> full Parquet (chunked)...')

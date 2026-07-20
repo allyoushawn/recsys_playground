@@ -1,16 +1,20 @@
-"""E2 smoke / E1 end-to-end proof: build an Ali-CCP training batch via
-``datasets.aliccp`` WITHOUT importing any model code.
+"""End-to-end proof: build an Ali-CCP training batch via this package's data layer.
 
 Validates the decoupled dataset layer on real data: reads the cached normalized
-Parquet + sparse vocab through ``datasets.aliccp.{data,encode}``, encodes a few
-row groups into tensors, and asserts the batch is well-formed — then asserts that
-no ESMM/model module was imported. This is the standalone proof that the data
-layer is usable by any model (E1) and a fast preflight that the pipeline is sound (E2).
+Parquet + sparse vocab through this package's ``data`` / ``encode`` modules, encodes a
+few row groups into tensors, and asserts the batch is well-formed — then asserts that
+no ESMM/model module leaked in. This package ships no model code at all (it is a data
+pipeline only), so this is a fast preflight that the pipeline output is sound and stays
+decoupled from any particular model.
 
-Usage (Colab, reusing the ESMM prep cache)::
+Usage (run directly from inside this folder)::
 
-    python -m datasets.aliccp.smoke \
-        --processed-dir /content/drive/MyDrive/colab/data/ali_ccp/processed_esmm_full_parquet
+    python smoke.py --processed-dir /path/to/processed_dir
+
+Equivalently, as part of this repo's `datasets.aliccp` package (repo root on
+`sys.path`, which is already true for anything run from the repo root)::
+
+    python -m datasets.aliccp.smoke --processed-dir /path/to/processed_dir
 
 Note: the first run rebuilds the sparse-vocab cache if absent/mismatched (a one-time
 full-train scan, ~25 min on 42M rows); once `preprocessed_sparse_vocab.pkl` is written
@@ -40,18 +44,29 @@ def main() -> None:
     import pyarrow.parquet as pq
     import torch
 
-    from datasets.aliccp.data import (
-        ALICCP_DENSE_FEAT_COLS as DENSEF,
-        ALICCP_SPARSE_COLS as SPARSE,
-        load_or_build_sparse_vocabs_filtered_parquet,
-    )
-    from datasets.aliccp.encode import _precompute_sparse_encode_tables, encode_and_tensorize_arrow
+    # Dual-mode import: relative when run as part of the `datasets.aliccp` package
+    # (e.g. `python -m datasets.aliccp.smoke`), flat when this file is run directly
+    # as a script (`python smoke.py`) — kept for standalone/vendored use.
+    try:
+        from .data import (
+            ALICCP_DENSE_FEAT_COLS as DENSEF,
+            ALICCP_SPARSE_COLS as SPARSE,
+            load_or_build_sparse_vocabs_filtered_parquet,
+        )
+        from .encode import _precompute_sparse_encode_tables, encode_and_tensorize_arrow
+    except ImportError:
+        from data import (
+            ALICCP_DENSE_FEAT_COLS as DENSEF,
+            ALICCP_SPARSE_COLS as SPARSE,
+            load_or_build_sparse_vocabs_filtered_parquet,
+        )
+        from encode import _precompute_sparse_encode_tables, encode_and_tensorize_arrow
 
     train_pq = os.path.join(args.processed_dir, "preprocessed_train.parquet")
     test_pq = os.path.join(args.processed_dir, "preprocessed_test.parquet")
     vocab_cache = os.path.join(args.processed_dir, "preprocessed_sparse_vocab.pkl")
     for f in (train_pq, test_pq):
-        assert os.path.isfile(f), f"missing {f} — run the ESMM prep (parse+normalize) first"
+        assert os.path.isfile(f), f"missing {f} — run the extract + parse + normalize steps first (see README.md)"
 
     t0 = time.time()
     vocabs, cards = load_or_build_sparse_vocabs_filtered_parquet(
@@ -72,13 +87,14 @@ def main() -> None:
     assert label_t.shape == (b,), label_t.shape
     assert torch.isfinite(dense_t).all(), "non-finite dense features"
     assert int(sparse_t.min()) >= 0, "negative sparse id"
-    # The whole point of E1: the data path pulls in NO model code.
+    # This package ships no model code, so nothing named like a model module can leak
+    # in. Kept as a cheap regression guard on the "data layer is model-agnostic" claim.
     leaked = [m for m in sys.modules if m.startswith("esmm_ali_ccp_impl")]
     assert not leaked, f"model module leaked into the data path: {leaked}"
 
     print(
-        f"[smoke] OK in {time.time() - t0:.1f}s — built a real batch via datasets.aliccp "
-        f"(B={b}, sparse={tuple(sparse_t.shape)}, dense={tuple(dense_t.shape)}, "
+        f"[smoke] OK in {time.time() - t0:.1f}s — built a real batch via this package's "
+        f"data layer (B={b}, sparse={tuple(sparse_t.shape)}, dense={tuple(dense_t.shape)}, "
         f"vocab_fields={len(cards)}); NO model module imported.",
         flush=True,
     )

@@ -1,7 +1,7 @@
 """Ali-CCP torch tensorizers: label-encode sparse features + build CPU tensors.
 
-Extracted (E1) from `experiments/20260404_ali_cpp_esmm/esmm_ali_ccp_impl.py`. Contains
-the torch-dependent encoding helpers only — NO model / training / evaluation code.
+Part of the `datasets.aliccp` package. Contains the torch-dependent encoding
+helpers only — NO model / training / evaluation code.
 """
 from __future__ import annotations
 
