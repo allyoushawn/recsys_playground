@@ -123,3 +123,12 @@ python smoke.py --processed-dir ./data/ali_ccp/processed
 `ALICCP_DENSE_FEAT_COLS` in `data.py`. Labels are `click` (CTR) and `purchase` (CVR);
 rows where `click == 0` and `purchase == 1` are dropped during parsing (purchase
 implies click in this dataset, so that combination is invalid).
+
+This 23 sparse + 8 dense field list and the dual use of some field IDs as both a
+categorical `feat` and a numeric `val` (`D…`) follow the community-standard Ali-CCP
+preprocess recipe, not a fresh discovery of the raw CSVs. Primary references:
+
+- **Parse / column recipe (including the sparse/dense split):**
+  [torch-rechub `preprocess_ali_ccp.py`](https://github.com/datawhalechina/torch-rechub/blob/main/examples/ranking/data/ali-ccp/preprocess_ali_ccp.py)
+- **Feature field ID → name mapping (user / item / combination / context):**
+  [NVIDIA Merlin Ali-CCP `dataset.py`](https://github.com/NVIDIA-Merlin/models/blob/stable/merlin/datasets/ecommerce/aliccp/dataset.py)
