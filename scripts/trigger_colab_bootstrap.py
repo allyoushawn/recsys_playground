@@ -23,6 +23,15 @@ Normal usage:
     → Writes viewport PNGs to /tmp/colab_trigger_<timestamp>_NN_<step>.png for review (disable: --no-screenshots).
     → After runtime connects, checks the Colab UI for the requested accelerator token (e.g. T4) and fails fast if missing.
 
+Concurrent / isolated sessions:
+    By default all sessions share CDP port 9222 and profile ~/.colab_chrome_profile,
+    and launching a new session force-kills whatever Chrome is already on that port.
+    To run a second, isolated session (e.g. while a first session's Chrome is being
+    kept alive via --keep-chrome) without touching the first session's Chrome:
+        python3 scripts/trigger_colab_bootstrap.py --cdp-port 9223 --profile-dir ~/.colab_chrome_profile_2
+    A profile dir used for the first time has no saved Google session -- run once
+    with --setup --profile-dir <same dir> before normal use with that dir.
+
 Requirements:
     pip3 install playwright
 """
@@ -1431,7 +1440,31 @@ def main():
         help="Override the Colab notebook URL (default: GitHub-hosted bootstrap notebook). "
              "Use a Drive URL like https://colab.research.google.com/drive/<FILE_ID> to iterate without GitHub commits.",
     )
+    parser.add_argument(
+        "--cdp-port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Chrome remote-debugging port (default: 9222). Override to run a second, "
+             "isolated bootstrap session concurrently without killing another session's Chrome.",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        default=None,
+        metavar="DIR",
+        help="Chrome user-data-dir / saved-session profile directory (default: ~/.colab_chrome_profile). "
+             "Override together with --cdp-port to run a fully isolated concurrent session. "
+             "A new profile dir has no saved Google session yet -- run once with --setup "
+             "(passing the same --profile-dir) before normal use.",
+    )
     args = parser.parse_args()
+
+    global CDP_PORT, CDP_URL, COLAB_PROFILE
+    if args.cdp_port is not None:
+        CDP_PORT = args.cdp_port
+        CDP_URL = f"http://localhost:{CDP_PORT}"
+    if args.profile_dir:
+        COLAB_PROFILE = Path(args.profile_dir).expanduser()
 
     if args.setup:
         run_setup()
